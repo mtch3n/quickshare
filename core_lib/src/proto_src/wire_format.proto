@@ -85,6 +85,7 @@ message WifiCredentialsMetadata {
     OPEN = 1;
     WPA_PSK = 2;
     WEP = 3;
+    SAE = 4;
   }
 
   // The Wifi network name. This will be sent in introduction.

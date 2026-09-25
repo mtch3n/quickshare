@@ -10,7 +10,9 @@ export function describeContent(transfer: Transfer) {
     case "Text":
       return "some text"
     case "Wifi":
-      return "a Wi-Fi network"
+      return meta.wifi?.ssid
+        ? `the Wi-Fi network "${meta.wifi.ssid}"`
+        : "a Wi-Fi network"
   }
 
   const files = meta?.files ?? []

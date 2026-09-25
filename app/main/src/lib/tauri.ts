@@ -6,6 +6,7 @@ import type { ChannelMessage } from "@bindings/ChannelMessage"
 import type { EndpointInfo } from "@bindings/EndpointInfo"
 import type { SendInfo } from "@bindings/SendInfo"
 import type { Visibility } from "@bindings/Visibility"
+import type { WifiNetwork } from "@bindings/WifiNetwork"
 
 export type Settings = {
   deviceName: string
@@ -34,6 +35,8 @@ export const api = {
   transferAction: (id: string, action: ChannelAction) =>
     invoke<void>("transfer_action", { id, action }),
   takePendingFiles: () => invoke<string[]>("take_pending_files"),
+  connectWifi: (network: WifiNetwork) =>
+    invoke<void>("connect_wifi", { network }),
 }
 
 /** Events emitted by src-tauri/src/main.rs and tray.rs. */

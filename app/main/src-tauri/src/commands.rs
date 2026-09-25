@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 
 use rqs_lib::channel::{ChannelAction, ChannelDirection, ChannelMessage};
-use rqs_lib::{SendInfo, Visibility};
+use rqs_lib::{SendInfo, Visibility, WifiNetwork};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use crate::{AppState, PendingFiles, integrations, store};
+use crate::{AppState, PendingFiles, integrations, store, wifi};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,6 +117,12 @@ pub fn transfer_action(id: String, action: ChannelAction, state: State<'_, AppSt
 #[tauri::command]
 pub fn take_pending_files(state: State<'_, PendingFiles>) -> Vec<String> {
     std::mem::take(&mut *state.0.lock().unwrap())
+}
+
+/// Connect to a Wi-Fi network using NetworkManager.
+#[tauri::command]
+pub async fn connect_wifi(network: WifiNetwork) -> Result<(), String> {
+    wifi::connect_wifi(network).await
 }
 
 pub fn send_action(state: &AppState, id: String, action: ChannelAction) {
