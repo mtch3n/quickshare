@@ -48,7 +48,8 @@ AppImages need FUSE 2 (`fuse2` on Arch, `libfuse2` on Debian/Ubuntu).
 | --- | --- |
 | Receive files, links, text, Wi-Fi credentials | ✅ |
 | Send files | ✅ |
-| Send text / links | ❌ not yet |
+| Send text / links | ✅ |
+| Send folders | ✅ |
 | Wi-Fi LAN transport (mDNS + TCP) | ✅ |
 | Bluetooth LE wake-up, so phones notice this computer | ✅ |
 | Receive over Bluetooth LE, then continue over Wi-Fi LAN | 🧪 experimental, see below |
