@@ -1089,7 +1089,14 @@ impl InboundRequest {
                 }
             };
 
-            let offline = self.decrypt_frame(&frame).await?;
+            // We're committed to TCP by now, so don't let the old channel end the session.
+            let offline = match self.decrypt_frame(&frame).await {
+                Ok(offline) => offline,
+                Err(e) => {
+                    warn!("BWU: unreadable frame on the prior channel, switching: {e}");
+                    return Ok(());
+                }
+            };
             match bwu::event(&offline) {
                 Some(UpgradeEvent::LastWriteToPriorChannel) => {
                     debug!("BWU: phone's LAST_WRITE, answering SAFE_TO_CLOSE");

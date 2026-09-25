@@ -29,6 +29,8 @@
 //! connection is up, that request offers a bandwidth upgrade to Wi-Fi LAN,
 //! because the socket moves tens of KB/s.
 
+use std::time::{Duration, Instant};
+
 use bluer::gatt::local::{
     Application, ApplicationHandle, Characteristic, CharacteristicNotifier, CharacteristicNotify,
     CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod,
@@ -74,6 +76,8 @@ const SOCKET_CONTROL_INTRODUCTION: [u8; 2] = [0x08, 0x01];
 const SOCKET_CONTROL_DISCONNECTION: [u8; 2] = [0x08, 0x02];
 
 const DUPLEX_BUFFER: usize = 64 * 1024;
+/// How long a connect request may wait for the phone's subscription.
+const PENDING_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq)]
 enum WeavePacket<'a> {
@@ -220,7 +224,7 @@ pub struct GattServer {
     notifier: Option<CharacteristicNotifier>,
     connection: Option<WeaveConnection>,
     /// A connect request that raced ahead of the phone's subscription.
-    pending_connect: Option<(Address, u16)>,
+    pending_connect: Option<(Address, u16, Instant)>,
 }
 
 impl GattServer {
@@ -326,7 +330,9 @@ impl GattServer {
                     // BlueZ only starts a new session once every earlier subscriber is gone.
                     self.close("superseded by a new subscription");
                     self.notifier = Some(notifier);
-                    if let Some((device, packet_size)) = self.pending_connect.take() {
+                    if let Some((device, packet_size, at)) = self.pending_connect.take()
+                        && at.elapsed() < PENDING_CONNECT_TIMEOUT
+                    {
                         self.connect(device, packet_size).await;
                     }
                 }
@@ -356,7 +362,7 @@ impl GattServer {
                 if self.notifier.is_some() {
                     self.connect(device, packet_size).await;
                 } else {
-                    self.pending_connect = Some((device, packet_size));
+                    self.pending_connect = Some((device, packet_size, Instant::now()));
                 }
             }
             Some(WeavePacket::Error) => {
