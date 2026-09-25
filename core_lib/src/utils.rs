@@ -8,7 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::CUSTOM_DOWNLOAD;
+use crate::{CUSTOM_DEVICE_NAME, CUSTOM_DOWNLOAD};
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize, TS)]
 #[ts(export)]
@@ -213,6 +213,22 @@ pub fn create_unique_file(path: &Path) -> std::io::Result<(PathBuf, File)> {
 
 pub fn hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
+}
+
+/// Normalizes a device name: trims it, caps at 64 characters, and returns empty if only whitespace.
+pub fn normalize_device_name(name: &str) -> String {
+    name.trim().chars().take(64).collect::<String>()
+}
+
+/// Returns the effective device name: normalized custom name if set, otherwise the hostname.
+pub fn effective_device_name() -> String {
+    if let Ok(mg) = CUSTOM_DEVICE_NAME.read()
+        && let Some(name) = mg.as_ref()
+        && !name.is_empty()
+    {
+        return name.clone();
+    }
+    hostname()
 }
 
 #[cfg(test)]

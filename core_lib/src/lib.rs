@@ -28,7 +28,9 @@ mod utils;
 
 pub use hdl::{EndpointInfo, OutboundPayload, State, Visibility};
 pub use manager::SendInfo;
-pub use utils::{DeviceType, get_download_dir, hostname};
+pub use utils::{
+    DeviceType, effective_device_name, get_download_dir, hostname, normalize_device_name,
+};
 
 pub mod sharing_nearby {
     include!(concat!(env!("OUT_DIR"), "/sharing.nearby.rs"));
@@ -47,6 +49,7 @@ pub mod location_nearby_connections {
 }
 
 static CUSTOM_DOWNLOAD: RwLock<Option<PathBuf>> = RwLock::new(None);
+static CUSTOM_DEVICE_NAME: RwLock<Option<String>> = RwLock::new(None);
 
 #[derive(Debug)]
 pub struct RQS {
@@ -59,6 +62,10 @@ pub struct RQS {
     // Used to trigger a change in the mDNS visibility (and later on, BLE)
     pub visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
     visibility_receiver: watch::Receiver<Visibility>,
+
+    // Used to trigger device name changes in mDNS and BLE
+    pub device_name_sender: Arc<Mutex<watch::Sender<String>>>,
+    device_name_receiver: watch::Receiver<String>,
 
     // Only used to send the info "a nearby device is sharing"
     ble_sender: broadcast::Sender<()>,
@@ -73,9 +80,13 @@ impl RQS {
         visibility: Visibility,
         port_number: Option<u32>,
         download_path: Option<PathBuf>,
+        device_name: Option<String>,
     ) -> Self {
         let mut guard = CUSTOM_DOWNLOAD.write().unwrap();
         *guard = download_path;
+
+        let mut dn_guard = CUSTOM_DEVICE_NAME.write().unwrap();
+        *dn_guard = device_name;
 
         let (message_sender, _) = broadcast::channel(50);
         let (ble_sender, _) = broadcast::channel(5);
@@ -84,12 +95,18 @@ impl RQS {
         let (visibility_sender, visibility_receiver) = watch::channel(Visibility::Invisible);
         let _ = visibility_sender.send(visibility);
 
+        // Initialize device_name with the effective name (normalized device_name or hostname)
+        let effective_name = utils::effective_device_name();
+        let (device_name_sender, device_name_receiver) = watch::channel(effective_name);
+
         Self {
             tracker: None,
             ctoken: None,
             discovery_ctk: None,
             visibility_sender: Arc::new(Mutex::new(visibility_sender)),
             visibility_receiver,
+            device_name_sender: Arc::new(Mutex::new(device_name_sender)),
+            device_name_receiver,
             ble_sender,
             port_number,
             message_sender,
@@ -149,6 +166,7 @@ impl RQS {
             self.ble_sender.subscribe(),
             self.visibility_sender.clone(),
             self.visibility_receiver.clone(),
+            self.device_name_receiver.clone(),
         )?;
         let ctk = ctoken.clone();
         tracker.spawn(async move { mdns.run(ctk).await });
@@ -156,9 +174,13 @@ impl RQS {
         // Receiving from phones that left Wi-Fi to share: a BLE advertisement
         // (same endpoint id as mDNS) and the GATT socket it leads to. Set up in
         // the background so a slow bluetoothd can't hold up the Wi-Fi side.
-        let advertisement = receiver_advertisement(endpoint_id[..4].try_into()?, &hostname());
+        let initial_device_name = utils::effective_device_name();
+        let advertisement =
+            receiver_advertisement(endpoint_id[..4].try_into()?, &initial_device_name);
         let sender = self.message_sender.clone();
         let visibility = self.visibility_receiver.clone();
+        let device_name = self.device_name_receiver.clone();
+        let endpoint_id_copy = endpoint_id[..4].try_into()?;
         let ctk = ctoken.clone();
         tracker.spawn(async move {
             let gatt = match GattServer::new(advertisement.clone(), sender, upgrade).await {
@@ -168,8 +190,12 @@ impl RQS {
                     return;
                 }
             };
-            let advertiser =
-                ReceiverAdvertiser::new(gatt.adapter().clone(), advertisement, visibility);
+            let advertiser = ReceiverAdvertiser::new(
+                gatt.adapter().clone(),
+                endpoint_id_copy,
+                visibility,
+                device_name,
+            );
             tokio::join!(advertiser.run(ctk.clone()), gatt.run(ctk));
         });
 
@@ -225,6 +251,20 @@ impl RQS {
             .lock()
             .unwrap()
             .send_modify(|state| *state = nv);
+    }
+
+    pub fn set_device_name(&self, name: String) {
+        let effective_name = utils::normalize_device_name(&name);
+        let mut dn_guard = CUSTOM_DEVICE_NAME.write().unwrap();
+        *dn_guard = if effective_name.is_empty() {
+            None
+        } else {
+            Some(effective_name.clone())
+        };
+        self.device_name_sender
+            .lock()
+            .unwrap()
+            .send_modify(|state| *state = effective_name);
     }
 
     pub async fn stop(&mut self) {

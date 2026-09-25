@@ -22,6 +22,8 @@ export const api = {
     invoke<void>("set_visibility", { visibility }),
   setDownloadPath: (path: string | null) =>
     invoke<void>("set_download_path", { path }),
+  setDeviceName: (name: string | null) =>
+    invoke<void>("set_device_name", { name }),
   setKeepRunning: (enabled: boolean) =>
     invoke<void>("set_keep_running", { enabled }),
   setFileManagerIntegration: (enabled: boolean) =>
@@ -39,6 +41,7 @@ type Events = {
   rs2js_channelmessage: ChannelMessage
   rs2js_endpointinfo: EndpointInfo
   visibility_updated: Visibility
+  device_name_updated: string
   send_files: string[]
   pick_files: null
 }
