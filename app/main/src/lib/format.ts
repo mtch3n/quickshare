@@ -21,3 +21,8 @@ export function formatBytes(bytes: number) {
 export function percent(done: number, total: number) {
   return total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
 }
+
+/** Only web links from peers are opened; other schemes could launch arbitrary handlers. */
+export function isWebUrl(text: string) {
+  return /^https?:\/\/\S+$/i.test(text.trim())
+}

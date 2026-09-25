@@ -48,20 +48,24 @@ AppImages need FUSE 2 (`fuse2` on Arch, `libfuse2` on Debian/Ubuntu).
 | --- | --- |
 | Receive files, links, text, Wi-Fi credentials | ✅ |
 | Send files | ✅ |
-| Send text / links | ❌ not yet |
+| Send text / links | ✅ |
+| Send folders | ✅ |
 | Wi-Fi LAN transport (mDNS + TCP) | ✅ |
 | Bluetooth LE wake-up, so phones notice this computer | ✅ |
-| Bluetooth data transfer (BLE / RFCOMM) | ❌ not yet, see below |
+| Receive over Bluetooth LE, then continue over Wi-Fi LAN | 🧪 experimental, see below |
+| Send over Bluetooth, Bluetooth Classic (RFCOMM) | ❌ |
 | Wi-Fi Direct / hotspot / WebRTC upgrades | ❌ |
 | "Your devices" / contacts-only visibility | ❌ needs Google account certificates |
 | AirDrop | ❌ see below |
 
-**Bluetooth.** Transfers currently run over Wi-Fi LAN only, so both devices must
-be on the same network with mDNS allowed. Bluetooth is only used to wake
-Android up so it looks for us. Receiving over Bluetooth LE has been shown to
-work with Pixel phones in another fork. It is also the fix for phones that
-turn Wi-Fi off while *Share with Apple devices* is enabled (Pixel 10, Galaxy S26).
-It is planned here.
+**Bluetooth.** Phones that turn Wi-Fi off while picking a target (Pixel 10,
+Galaxy S26 with *Share with Apple devices* on) only find this computer over
+Bluetooth LE. While visible, the app advertises itself over BLE and accepts the
+phone's BLE connection; once the handshake is done it asks the phone to continue
+over Wi-Fi LAN, since BLE is very slow. If the phone can't reach this computer
+over Wi-Fi, the transfer stays on BLE. Ported from
+[martinalderson/rquickshare](https://github.com/martinalderson/rquickshare),
+where it was verified on Pixels. Sending still needs Wi-Fi LAN.
 
 **AirDrop.** Not supported, and not realistic in this app. It needs Apple's
 AWDL Wi-Fi link, which on Linux only works with a few Wi-Fi chips that
@@ -87,7 +91,8 @@ compete with your other devices.
 
 **My firewall blocks transfers.** Pin the port in
 `~/.local/share/dev.mandre.rquickshare/.settings.json`, for example
-`"port": 12345`, then allow that TCP port and mDNS (UDP 5353).
+`"port": 12345`, then allow that TCP port and mDNS (UDP 5353). Transfers that
+start over Bluetooth move to the same port.
 
 **The window is blank.** WebKitGTK's GPU renderer is already disabled by
 default. If it still happens, try `WEBKIT_DISABLE_COMPOSITING_MODE=1 ./RQuickShare-*.AppImage`.
@@ -102,5 +107,7 @@ See [BUILD.md](BUILD.md).
 - [grishka/NearDrop](https://github.com/grishka/NearDrop) and
   [vicr123/QNearbyShare](https://github.com/vicr123/QNearbyShare), for documenting the protocol
 - [nozwock/packet](https://github.com/nozwock/packet), which inspired the file manager integration
+- [martinalderson/rquickshare](https://github.com/martinalderson/rquickshare), for reverse-engineering
+  receiving over Bluetooth LE
 
 Licensed under the GNU GPL v3.

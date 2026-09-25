@@ -4,10 +4,12 @@ extern crate log;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use rqs_lib::channel::{ChannelDirection, ChannelMessage};
-use rqs_lib::{EndpointInfo, RQS, SendInfo, State, Visibility};
+use rqs_lib::channel::{ChannelAction, ChannelDirection, ChannelMessage};
+use rqs_lib::{EndpointInfo, RQS, SendInfo, State, TextPayloadType, Visibility};
 use tauri::{AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::logger::set_up_logging;
@@ -20,6 +22,7 @@ mod logger;
 mod notification;
 mod store;
 mod tray;
+mod wifi;
 
 /// Passed by the autostart entry so the app starts in the tray.
 const HIDDEN_ARG: &str = "--hidden";
@@ -28,6 +31,7 @@ pub struct AppState {
     pub message_sender: broadcast::Sender<ChannelMessage>,
     pub dch_sender: broadcast::Sender<EndpointInfo>,
     pub visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
+    pub device_name_sender: Arc<Mutex<watch::Sender<String>>>,
     pub sender_file: mpsc::Sender<SendInfo>,
     pub ble_receiver: broadcast::Receiver<()>,
     pub rqs: Mutex<RQS>,
@@ -96,6 +100,7 @@ fn run() -> Result<(), anyhow::Error> {
             commands::get_settings,
             commands::set_visibility,
             commands::set_download_path,
+            commands::set_device_name,
             commands::set_keep_running,
             commands::set_file_manager_integration,
             commands::start_discovery,
@@ -103,6 +108,11 @@ fn run() -> Result<(), anyhow::Error> {
             commands::send_payload,
             commands::transfer_action,
             commands::take_pending_files,
+            commands::connect_wifi,
+            commands::trust_device,
+            commands::untrust_device,
+            commands::set_auto_open_links,
+            commands::set_auto_copy_text,
         ])
         .setup(move |app| {
             set_up_logging(app.app_handle())?;
@@ -119,18 +129,20 @@ fn run() -> Result<(), anyhow::Error> {
             let visibility = store::visibility(app.app_handle());
             let port_number = store::port(app.app_handle());
             let download_path = store::download_path(app.app_handle());
+            let device_name = store::device_name(app.app_handle());
 
             let app_handle = app.app_handle().clone();
             // Block until the service is up so the logger is already in place
             // and every command can rely on AppState being managed.
             tauri::async_runtime::block_on(async move {
-                let mut rqs = RQS::new(visibility, port_number, download_path);
+                let mut rqs = RQS::new(visibility, port_number, download_path, device_name);
                 let (sender_file, ble_receiver) = rqs.run().await?;
 
                 app_handle.manage(AppState {
                     message_sender: rqs.message_sender.clone(),
                     dch_sender: broadcast::channel(10).0,
                     visibility_sender: rqs.visibility_sender.clone(),
+                    device_name_sender: rqs.device_name_sender.clone(),
                     sender_file,
                     ble_receiver,
                     rqs: Mutex::new(rqs),
@@ -173,7 +185,7 @@ fn files_from_args(args: &[String], cwd: &Path) -> Vec<String> {
         .skip(1)
         .filter(|a| !a.starts_with("--"))
         .map(|a| cwd.join(a))
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_file() || p.is_dir())
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
 }
@@ -184,6 +196,8 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
         let state: tauri::State<'_, AppState> = capp_handle.state();
         let tray: tauri::State<'_, TrayHandle> = capp_handle.state();
         let mut receiver = state.message_sender.subscribe();
+        let mut handled_finished: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         loop {
             match receiver.recv().await {
@@ -193,6 +207,9 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                     }
 
                     let waiting = info.state == Some(State::WaitingForUserConsent);
+                    let finished = info.state == Some(State::Finished);
+
+                    // Auto-accept from trusted devices
                     if waiting {
                         let name = info
                             .meta
@@ -200,8 +217,71 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                             .and_then(|meta| meta.source.as_ref())
                             .map(|source| source.name.clone())
                             .unwrap_or_else(|| "Unknown".to_string());
+
+                        let trusted_devices = store::trusted_devices(&capp_handle);
+                        if trusted_devices.contains(&name) {
+                            trace!("Auto-accepting from trusted device: {}", name);
+                            commands::send_action(
+                                &state,
+                                info.id.clone(),
+                                ChannelAction::AcceptTransfer,
+                            );
+                            if info.state.is_some() {
+                                tray.set_waiting(info.id.clone(), false).await;
+                            }
+                            continue;
+                        }
+
                         send_request_notification(name, info.id.clone(), &capp_handle);
                     }
+
+                    // Auto-open links, auto-copy text, and show received notification on Finished
+                    if finished && !handled_finished.contains(&info.id) {
+                        handled_finished.insert(info.id.clone());
+
+                        if let Some(meta) = &info.meta {
+                            // Auto-open links
+                            if store::auto_open_links(&capp_handle)
+                                && matches!(meta.text_type, Some(TextPayloadType::Url))
+                                && let Some(url) = &meta.text_payload
+                                && is_web_url(url)
+                                && let Err(e) = capp_handle.opener().open_url(url, None::<&str>)
+                            {
+                                warn!("Couldn't auto-open URL: {e}");
+                            }
+
+                            // Auto-copy text
+                            if store::auto_copy_text(&capp_handle)
+                                && matches!(meta.text_type, Some(TextPayloadType::Text))
+                                && let Some(text) = &meta.text_payload
+                                && let Err(e) = capp_handle.clipboard().write_text(text.clone())
+                            {
+                                warn!("Couldn't auto-copy text: {e}");
+                            }
+
+                            // Show received notification if window is not visible
+                            if let Some(window) = capp_handle.get_webview_window("main")
+                                && !window.is_visible().unwrap_or(false)
+                            {
+                                let source_name = meta
+                                    .source
+                                    .as_ref()
+                                    .map(|source| source.name.clone())
+                                    .unwrap_or_else(|| "A nearby device".to_string());
+                                let text_type_str =
+                                    meta.text_type.as_ref().map(|t| format!("{t:?}"));
+                                notification::send_received_notification(
+                                    source_name,
+                                    meta.files.clone(),
+                                    meta.destination.clone(),
+                                    text_type_str,
+                                    meta.text_payload.clone(),
+                                    &capp_handle,
+                                );
+                            }
+                        }
+                    }
+
                     if info.state.is_some() {
                         tray.set_waiting(info.id.clone(), waiting).await;
                     }
@@ -247,6 +327,18 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
             store::set_visibility(&capp_handle, v);
             let _ = capp_handle.emit("visibility_updated", v);
             tray.set_visibility(v).await;
+        }
+    });
+
+    let capp_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let state: tauri::State<'_, AppState> = capp_handle.state();
+        let mut device_name_receiver = state.device_name_sender.lock().unwrap().subscribe();
+
+        while device_name_receiver.changed().await.is_ok() {
+            let name = device_name_receiver.borrow_and_update().clone();
+            store::set_device_name(&capp_handle, Some(&name));
+            let _ = capp_handle.emit("device_name_updated", &name);
         }
     });
 
@@ -331,4 +423,12 @@ fn fix_wayland_titlebar(window: &tauri::WebviewWindow) {
     {
         event_box.set_above_child(false);
     }
+}
+
+/// Links from peers are only opened if they are web links: a `file:` or custom
+/// scheme URL would hand attacker-controlled input to arbitrary handlers.
+pub fn is_web_url(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.contains(char::is_whitespace)
 }

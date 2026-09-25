@@ -1,4 +1,5 @@
-import { HistoryIcon, SettingsIcon, UploadIcon } from "lucide-react"
+import * as React from "react"
+import { HistoryIcon, SendIcon, SettingsIcon, UploadIcon } from "lucide-react"
 
 import { TransferItem } from "@/components/transfer-item"
 import { Button } from "@/components/ui/button"
@@ -18,18 +19,29 @@ import {
 } from "@/components/ui/empty"
 import { ItemGroup } from "@/components/ui/item"
 import { Switch } from "@/components/ui/switch"
+import { Textarea } from "@/components/ui/textarea"
 import { isShown, isTerminal, useQuickShare } from "@/hooks/quick-share"
 import { api } from "@/lib/tauri"
 
 export function HomePage({
   onPickFiles,
+  onSendText,
   onOpenSettings,
 }: {
   onPickFiles: () => void
+  onSendText: (text: string) => void
   onOpenSettings: () => void
 }) {
   const { settings, transfers, clearFinished } = useQuickShare()
   const shown = transfers.filter(isShown)
+  const [text, setText] = React.useState("")
+
+  const handleSendText = () => {
+    if (text.trim()) {
+      onSendText(text)
+      setText("")
+    }
+  }
 
   return (
     <div className="flex min-h-svh flex-col gap-4 p-4">
@@ -56,14 +68,39 @@ export function HomePage({
       <Card className="border-dashed">
         <CardHeader className="items-center text-center">
           <UploadIcon className="mx-auto text-muted-foreground" />
-          <CardTitle>Send files</CardTitle>
+          <CardTitle>Send files or folders</CardTitle>
           <CardDescription>
-            Drop files anywhere in this window, or choose them.
+            Drop files or folders anywhere in this window, or choose them.
           </CardDescription>
           <Button className="mx-auto mt-2" onClick={onPickFiles}>
             Choose files
           </Button>
         </CardHeader>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Send text or link</CardTitle>
+          <CardDescription>
+            Share text, URLs, or other text content
+          </CardDescription>
+        </CardHeader>
+        <div className="flex flex-col gap-2 px-4 pb-4">
+          <Textarea
+            placeholder="Enter text, a URL, or any content you want to share…"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            className="min-h-24 resize-none"
+          />
+          <Button
+            onClick={handleSendText}
+            disabled={!text.trim()}
+            className="w-full"
+          >
+            <SendIcon data-icon="inline-start" />
+            Send text
+          </Button>
+        </div>
       </Card>
 
       <section className="flex flex-1 flex-col gap-2">

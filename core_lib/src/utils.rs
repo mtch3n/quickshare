@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -8,7 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::CUSTOM_DOWNLOAD;
+use crate::{CUSTOM_DEVICE_NAME, CUSTOM_DOWNLOAD};
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize, TS)]
 #[ts(export)]
@@ -73,6 +73,9 @@ pub fn parse_endpoint_info(info: &[u8]) -> Result<(DeviceType, Option<String>), 
     ))
 }
 
+/// First 3 bytes of SHA-256("NearbySharing"), the Quick Share service id.
+pub const SERVICE_ID_HASH: [u8; 3] = [0xFC, 0x9F, 0x5E];
+
 pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
     let mut name_b = Vec::new();
 
@@ -81,8 +84,7 @@ pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
 
     name_b.extend_from_slice(&endpoint_id);
 
-    let service_id: [u8; 3] = [0xFC, 0x9F, 0x5E];
-    name_b.extend_from_slice(&service_id);
+    name_b.extend_from_slice(&SERVICE_ID_HASH);
 
     let unknown_bytes: [u8; 2] = [0x00, 0x00];
     name_b.extend_from_slice(&unknown_bytes);
@@ -136,6 +138,34 @@ pub fn get_download_dir() -> PathBuf {
     Path::new("/").to_path_buf()
 }
 
+/// The address phones on our LAN reach us at, offered for Wi-Fi upgrades: the
+/// source address of the default route (which skips container bridges),
+/// else the first private address.
+pub fn lan_ipv4() -> Option<Ipv4Addr> {
+    let routed = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .and_then(|socket| {
+            // Only selects a route, nothing is sent. TEST-NET-1 has no route of
+            // its own, so the default route is picked.
+            socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
+            socket.local_addr()
+        })
+        .ok()
+        .and_then(|addr| match addr.ip() {
+            IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+            _ => None,
+        });
+
+    routed.or_else(|| {
+        if_addrs::get_if_addrs()
+            .ok()?
+            .into_iter()
+            .find_map(|iface| match iface.ip() {
+                IpAddr::V4(ip) if ip.is_private() => Some(ip),
+                _ => None,
+            })
+    })
+}
+
 pub fn is_not_self_ip(ip_address: &Ipv4Addr) -> bool {
     let ip = IpAddr::V4(*ip_address);
     if_addrs::get_if_addrs()
@@ -185,9 +215,92 @@ pub fn hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
 }
 
+/// Expands directories into regular files recursively.
+/// Returns tuples of (file_path, parent_folder_relative_to_base).
+/// Skips symlinks and special files.
+/// For a directory, parent_folder is the relative path from the directory's parent.
+pub fn expand_directories(paths: &[String]) -> Vec<(String, Option<String>)> {
+    let mut result = vec![];
+
+    for path_str in paths {
+        let path = Path::new(path_str);
+
+        if path.is_dir() {
+            // For directories, track the base path and expand recursively
+            expand_dir_recursive(path, path, &mut result);
+        } else if path.is_file() {
+            // Not a directory, add as-is
+            result.push((path_str.clone(), None));
+        }
+    }
+
+    result
+}
+
+fn expand_dir_recursive(
+    base_dir: &Path,
+    current_dir: &Path,
+    result: &mut Vec<(String, Option<String>)>,
+) {
+    if let Ok(entries) = std::fs::read_dir(current_dir) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+
+            // Skip symlinks
+            if entry_path.is_symlink() {
+                continue;
+            }
+
+            if entry_path.is_file() {
+                if let Some(file_path_str) = entry_path.to_str() {
+                    // Compute relative path from base directory's parent
+                    let parent_folder = entry_path
+                        .parent()
+                        .and_then(|p| {
+                            base_dir.parent().and_then(|base_parent| {
+                                p.strip_prefix(base_parent)
+                                    .ok()
+                                    .and_then(|rel| rel.to_str())
+                            })
+                        })
+                        .map(|s| s.to_string());
+
+                    result.push((file_path_str.to_string(), parent_folder));
+                }
+            } else if entry_path.is_dir() {
+                // Recursively expand subdirectories
+                expand_dir_recursive(base_dir, &entry_path, result);
+            }
+        }
+    }
+}
+
+/// Normalizes a device name: trims it, caps at 64 characters, and returns empty if only whitespace.
+pub fn normalize_device_name(name: &str) -> String {
+    name.trim().chars().take(64).collect::<String>()
+}
+
+/// Returns the effective device name: normalized custom name if set, otherwise the hostname.
+pub fn effective_device_name() -> String {
+    if let Ok(mg) = CUSTOM_DEVICE_NAME.read()
+        && let Some(name) = mg.as_ref()
+        && !name.is_empty()
+    {
+        return name.clone();
+    }
+    hostname()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_id_hash_matches_nearby_sharing() {
+        use sha2::{Digest, Sha256};
+
+        assert_eq!(Sha256::digest(b"NearbySharing")[..3], SERVICE_ID_HASH);
+    }
 
     #[test]
     fn endpoint_info_roundtrip() {
@@ -253,5 +366,49 @@ mod tests {
         assert_eq!(second, dir.join("a (1).txt"));
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parent_folder_cannot_escape_download_dir() {
+        let download_dir = Path::new("/home/user/Downloads");
+
+        // Test normal parent_folder
+        let mut path = download_dir.to_path_buf();
+        if let Some(sanitized) = sanitize_file_name("folder") {
+            path.push(sanitized);
+        }
+        path.push("file.txt");
+        // Path should be /home/user/Downloads/folder/file.txt
+        assert!(path.starts_with(download_dir));
+
+        // Test escaped parent_folder with ".." - should be filtered out
+        let mut path = download_dir.to_path_buf();
+        for component in "..".split('/') {
+            if !component.is_empty()
+                && component != "."
+                && component != ".."
+                && let Some(sanitized) = sanitize_file_name(component)
+            {
+                path.push(sanitized);
+            }
+        }
+        path.push("file.txt");
+        // Path should remain /home/user/Downloads/file.txt (no ".." added)
+        assert!(path.starts_with(download_dir));
+
+        // Test deep nested folders
+        let mut path = download_dir.to_path_buf();
+        for component in "folder1/subfolder/deep".split('/') {
+            if !component.is_empty()
+                && component != "."
+                && component != ".."
+                && let Some(sanitized) = sanitize_file_name(component)
+            {
+                path.push(sanitized);
+            }
+        }
+        path.push("file.txt");
+        // Path should be /home/user/Downloads/folder1/subfolder/deep/file.txt
+        assert!(path.starts_with(download_dir));
     }
 }

@@ -1,5 +1,7 @@
 //! Length-prefixed frame transport shared by inbound and outbound connections.
-//! Works over any byte stream (TCP today, Bluetooth sockets later).
+//! Works over any byte stream: TCP, or the BLE weave socket bridged through a
+//! duplex. A bandwidth upgrade swaps the whole transport for the new TCP one,
+//! which keeps whatever that connection already buffered.
 
 use anyhow::anyhow;
 use futures::StreamExt;
@@ -42,6 +44,12 @@ impl Transport {
             Some(frame) => Ok(frame?.to_vec()),
             None => Err(anyhow!("connection closed by peer")),
         }
+    }
+
+    /// Bytes already received but not yet returned as a frame. Must be zero
+    /// when a bandwidth upgrade retires this transport, or they'd be lost.
+    pub fn buffered(&self) -> usize {
+        self.reader.read_buffer().len()
     }
 
     pub async fn write_frame(&mut self, data: &[u8]) -> Result<(), anyhow::Error> {

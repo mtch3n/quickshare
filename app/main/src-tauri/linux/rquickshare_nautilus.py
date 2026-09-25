@@ -13,7 +13,7 @@ class RQuickShareMenuProvider(GObject.GObject, Nautilus.MenuProvider):
     # Nautilus 43+ calls get_file_items(files), older versions (window, files).
     def get_file_items(self, *args):
         files = args[-1]
-        if not files or any(f.get_uri_scheme() != "file" or f.is_directory() for f in files):
+        if not files or any(f.get_uri_scheme() != "file" for f in files):
             return []
 
         item = Nautilus.MenuItem(

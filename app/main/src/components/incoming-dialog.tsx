@@ -1,3 +1,4 @@
+import * as React from "react"
 import { DeviceIcon } from "@/components/device-icon"
 import {
   AlertDialog,
@@ -11,6 +12,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
 import { useQuickShare } from "@/hooks/quick-share"
 import { fileName, formatBytes } from "@/lib/format"
 import { api } from "@/lib/tauri"
@@ -21,6 +23,7 @@ const MAX_LISTED_FILES = 5
 /** Asks whether to accept the oldest pending incoming transfer. */
 export function IncomingDialog() {
   const { transfers } = useQuickShare()
+  const [trust, setTrust] = React.useState(false)
   const pending = transfers.findLast(
     (t) => t.direction === "Inbound" && t.state === "WaitingForUserConsent"
   )
@@ -30,8 +33,12 @@ export function IncomingDialog() {
   const meta = pending.meta
   const files = meta?.files ?? []
   const name = meta?.source?.name ?? "A nearby device"
-  const respond = (accept: boolean) =>
+  const respond = async (accept: boolean) => {
+    if (accept && trust) {
+      await api.trustDevice(name)
+    }
     api.transferAction(pending.id, accept ? "AcceptTransfer" : "RejectTransfer")
+  }
 
   return (
     <AlertDialog open>
@@ -76,6 +83,20 @@ export function IncomingDialog() {
             <Badge variant="secondary">{meta.pin_code}</Badge>
           </p>
         )}
+
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="trust-device"
+            checked={trust}
+            onCheckedChange={setTrust}
+          />
+          <label
+            htmlFor="trust-device"
+            className="cursor-pointer text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+          >
+            Always accept from {name}
+          </label>
+        </div>
 
         <AlertDialogFooter>
           <AlertDialogCancel onClick={() => respond(false)}>

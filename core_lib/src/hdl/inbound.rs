@@ -6,12 +6,15 @@ use prost::Message;
 use sha2::{Digest, Sha512};
 use tokio::sync::broadcast::{Receiver, Sender};
 
+use super::bwu::{self, PendingUpgrade, WifiLanUpgrade};
 use super::crypto::{self, Role};
 use super::transport::Transport;
 use super::{InnerState, State};
 use crate::channel::{ChannelAction, ChannelDirection, ChannelMessage};
-use crate::hdl::info::{InternalFileInfo, TransferMetadata};
+use crate::errors::AppError;
+use crate::hdl::info::{InternalFileInfo, TransferMetadata, WifiNetwork, WifiSecurity};
 use crate::hdl::{TextPayloadInfo, TextPayloadType};
+use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType as UpgradeEvent;
 use crate::location_nearby_connections::payload_transfer_frame::control_message::EventType as ControlEvent;
 use crate::location_nearby_connections::payload_transfer_frame::{
     PacketType, PayloadChunk, PayloadHeader, payload_header,
@@ -26,15 +29,24 @@ use crate::securemessage::{
     EcP256PublicKey, EncScheme, GenericPublicKey, Header, HeaderAndBody, PublicKeyType,
     SecureMessage, SigScheme,
 };
-use crate::sharing_nearby::{paired_key_result_frame, text_metadata};
+use crate::sharing_nearby::{
+    WifiCredentials, paired_key_result_frame, text_metadata, wifi_credentials_metadata,
+};
 use crate::utils::{
-    RemoteDeviceInfo, create_unique_file, gen_random, get_download_dir, parse_endpoint_info,
-    sanitize_file_name,
+    RemoteDeviceInfo, create_unique_file, gen_random, get_download_dir, lan_ipv4,
+    parse_endpoint_info, sanitize_file_name,
 };
 use crate::{location_nearby_connections, sharing_nearby};
 
 const SANE_FRAME_LENGTH: i32 = 5 * 1024 * 1024;
 const SANITY_DURATION: Duration = Duration::from_micros(10);
+
+/// How long the phone gets to come over Wi-Fi before we stay on BLE.
+const UPGRADE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest pause in the prior channel while draining it.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for the phone's DISCONNECTION on the prior channel.
+const PRIOR_DISCONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub struct InboundRequest {
@@ -42,6 +54,10 @@ pub struct InboundRequest {
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
+    /// Set for BLE sessions, which move to Wi-Fi once encrypted.
+    upgrade: Option<WifiLanUpgrade>,
+    /// The phone's Nearby endpoint id, from its connection request.
+    peer_endpoint_id: Option<String>,
 }
 
 impl InboundRequest {
@@ -60,6 +76,49 @@ impl InboundRequest {
             },
             sender,
             receiver,
+            upgrade: None,
+            peer_endpoint_id: None,
+        }
+    }
+
+    /// Offers the phone to continue over Wi-Fi LAN once the connection is encrypted.
+    pub fn with_wifi_lan_upgrade(mut self, upgrade: WifiLanUpgrade) -> Self {
+        self.upgrade = Some(upgrade);
+        self
+    }
+
+    /// Drives the connection until it ends, reporting an unexpected
+    /// disconnection to the frontend. `first_frame` was already read off the
+    /// transport.
+    pub async fn run(mut self, mut first_frame: Option<Vec<u8>>) {
+        loop {
+            let result = match first_frame.take() {
+                Some(frame) => self.handle_frame(frame).await,
+                None => self.handle().await,
+            };
+            let Err(e) = result else {
+                continue;
+            };
+
+            if matches!(e.downcast_ref(), Some(AppError::NotAnError))
+                || self.state.state == State::Initial
+            {
+                break;
+            }
+
+            if self.state.state != State::Finished {
+                let _ = self.sender.send(ChannelMessage {
+                    id: self.state.id.clone(),
+                    direction: ChannelDirection::LibToFront,
+                    state: Some(State::Disconnected),
+                    ..Default::default()
+                });
+            }
+            error!(
+                "inbound: error while handling {}: {e} ({:?})",
+                self.state.id, self.state.state
+            );
+            break;
         }
     }
 
@@ -108,14 +167,14 @@ impl InboundRequest {
                 }
             },
             frame = self.transport.read_frame() => {
-                self._handle(frame?).await?
+                self.handle_frame(frame?).await?
             }
         }
 
         Ok(())
     }
 
-    async fn _handle(&mut self, frame_data: Vec<u8>) -> Result<(), anyhow::Error> {
+    async fn handle_frame(&mut self, frame_data: Vec<u8>) -> Result<(), anyhow::Error> {
         let current_state = &self.state;
         // Now determine what will be the request type based on current state
         match current_state.state {
@@ -174,11 +233,16 @@ impl InboundRequest {
                     false,
                 )
                 .await;
+
+                // Encrypted now, so a BLE session can move to Wi-Fi.
+                if let Some(upgrade) = self.upgrade.take() {
+                    self.upgrade_to_wifi_lan(upgrade).await?;
+                }
             }
             _ => {
                 debug!("Handling SecureMessage frame");
-                let smsg = SecureMessage::decode(&*frame_data)?;
-                self.decrypt_and_process_secure_message(&smsg).await?;
+                let offline = self.decrypt_frame(&frame_data).await?;
+                self.process_offline_frame(offline).await?;
             }
         }
 
@@ -186,7 +250,7 @@ impl InboundRequest {
     }
 
     fn process_connection_request(
-        &self,
+        &mut self,
         frame: &location_nearby_connections::OfflineFrame,
     ) -> Result<RemoteDeviceInfo, anyhow::Error> {
         let v1_frame = frame
@@ -206,6 +270,7 @@ impl InboundRequest {
             .connection_request
             .as_ref()
             .ok_or_else(|| anyhow!("Missing required fields"))?;
+        self.peer_endpoint_id = connection_request.endpoint_id.clone();
 
         let endpoint_info = connection_request
             .endpoint_info
@@ -412,10 +477,9 @@ impl InboundRequest {
         Ok(())
     }
 
-    async fn decrypt_and_process_secure_message(
-        &mut self,
-        smsg: &SecureMessage,
-    ) -> Result<(), anyhow::Error> {
+    /// Verifies and decrypts a SecureMessage frame, checking its sequence number.
+    async fn decrypt_frame(&mut self, frame_data: &[u8]) -> Result<OfflineFrame, anyhow::Error> {
+        let smsg = SecureMessage::decode(frame_data)?;
         crypto::verify(
             self.state.recv_hmac_key.as_ref().unwrap(),
             &smsg.header_and_body,
@@ -440,7 +504,10 @@ impl InboundRequest {
             ));
         }
 
-        let offline = location_nearby_connections::OfflineFrame::decode(d2d_msg.message())?;
+        Ok(OfflineFrame::decode(d2d_msg.message())?)
+    }
+
+    async fn process_offline_frame(&mut self, offline: OfflineFrame) -> Result<(), anyhow::Error> {
         let v1_frame = offline
             .v1
             .as_ref()
@@ -541,13 +608,42 @@ impl InboundRequest {
                                         )
                                         .await;
                                     }
-                                    TextPayloadInfo::Wifi((_, ssid)) => {
+                                    TextPayloadInfo::Wifi((_, ssid, security_type)) => {
+                                        let wifi_network = WifiCredentials::decode(buffer.as_slice())
+                                            .ok()
+                                            .and_then(|creds| {
+                                                let security = match security_type {
+                                                    wifi_credentials_metadata::SecurityType::Open => {
+                                                        WifiSecurity::Open
+                                                    }
+                                                    wifi_credentials_metadata::SecurityType::WpaPsk => {
+                                                        WifiSecurity::WpaPsk
+                                                    }
+                                                    wifi_credentials_metadata::SecurityType::Wep => {
+                                                        WifiSecurity::Wep
+                                                    }
+                                                    wifi_credentials_metadata::SecurityType::Sae => {
+                                                        WifiSecurity::Sae
+                                                    }
+                                                    wifi_credentials_metadata::SecurityType::UnknownSecurityType => {
+                                                        return None;
+                                                    }
+                                                };
+
+                                                Some(WifiNetwork {
+                                                    ssid: ssid.clone(),
+                                                    password: creds.password.unwrap_or_default(),
+                                                    security,
+                                                    hidden: creds.hidden_ssid.unwrap_or(false),
+                                                })
+                                            });
+
                                         self.update_state(
                                             |e| {
                                                 if let Some(tmd) = e.transfer_metadata.as_mut() {
-                                                    tmd.text_payload =
-                                                        Some(format!("{ssid}: {}", payload.trim()));
+                                                    tmd.text_payload = Some(ssid.clone());
                                                     tmd.text_type = Some(TextPayloadType::Wifi);
+                                                    tmd.wifi = wifi_network;
                                                 }
                                             },
                                             false,
@@ -650,6 +746,12 @@ impl InboundRequest {
                 trace!("Sending keepalive");
                 self.send_keepalive(true).await?;
             }
+            location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation => {
+                info!(
+                    "Ignoring bandwidth upgrade frame: {:?}",
+                    bwu::event(&offline)
+                );
+            }
             _ => {
                 error!("Unhandled offline frame encrypted: {:?}", offline);
             }
@@ -697,7 +799,15 @@ impl InboundRequest {
             }
             State::ReceivedPairedKeyResult => {
                 debug!("Processing State::ReceivedPairedKeyResult");
-                self.process_introduction(v1_frame).await?;
+                // Newer Pixels send other frames before the introduction.
+                if v1_frame.introduction.is_some() {
+                    self.process_introduction(v1_frame).await?;
+                } else {
+                    debug!(
+                        "Awaiting introduction, ignoring {:?} frame",
+                        v1_frame.r#type()
+                    );
+                }
             }
             _ => {
                 info!(
@@ -771,7 +881,25 @@ impl InboundRequest {
             for file in &introduction.file_metadata {
                 let name = sanitize_file_name(file.name())
                     .unwrap_or_else(|| format!("file_{}", file.payload_id()));
-                let dest = get_download_dir().join(&name);
+
+                let mut dest = get_download_dir();
+
+                // Handle parent_folder if present
+                let parent_folder = file.parent_folder();
+                if !parent_folder.is_empty() {
+                    // Split by '/' and sanitize each component
+                    for component in parent_folder.split('/') {
+                        if !component.is_empty()
+                            && component != "."
+                            && component != ".."
+                            && let Some(sanitized) = sanitize_file_name(component)
+                        {
+                            dest.push(sanitized);
+                        }
+                    }
+                }
+
+                dest.push(&name);
 
                 let info = InternalFileInfo {
                     payload_id: file.payload_id(),
@@ -881,6 +1009,7 @@ impl InboundRequest {
                     e.text_payload = Some(TextPayloadInfo::Wifi((
                         meta.payload_id(),
                         meta.ssid().to_owned(),
+                        meta.security_type(),
                     )));
                     e.transfer_metadata = Some(metadata);
                 },
@@ -896,6 +1025,146 @@ impl InboundRequest {
         }
 
         Ok(())
+    }
+
+    /// Nearby's bandwidth upgrade to Wi-Fi LAN with us as the initiator, see
+    /// `bwu.rs`. The session stays on BLE until the phone has come over; once
+    /// we've acknowledged its connection there is no way back.
+    async fn upgrade_to_wifi_lan(&mut self, upgrade: WifiLanUpgrade) -> Result<(), anyhow::Error> {
+        let (Some(ip), Some(endpoint_id)) = (lan_ipv4(), self.peer_endpoint_id.clone()) else {
+            warn!("BWU: no LAN address or phone endpoint id, staying on BLE");
+            return Ok(());
+        };
+
+        let mut pending = upgrade.registry.expect(endpoint_id);
+        info!("BWU: offering Wi-Fi LAN at {ip}:{}", upgrade.port);
+        self.encrypt_and_send(&bwu::upgrade_path_available(ip, upgrade.port))
+            .await?;
+
+        let Some(mut upgraded) = self.wait_for_upgrade(&mut pending).await? else {
+            return Ok(());
+        };
+        drop(pending);
+
+        upgraded
+            .write_frame(&bwu::client_introduction_ack().encode_to_vec())
+            .await?;
+        self.encrypt_and_send(&bwu::event_frame(UpgradeEvent::LastWriteToPriorChannel))
+            .await?;
+        self.drain_prior_channel().await?;
+
+        // Plaintext, so it doesn't take a sequence number. The phone keeps the
+        // new channel paused until it reads this, and sends its own.
+        if let Err(e) = self
+            .send_frame(bwu::prior_channel_disconnection().encode_to_vec())
+            .await
+        {
+            debug!("BWU: couldn't close the prior channel: {e}");
+        }
+        match tokio::time::timeout(PRIOR_DISCONNECTION_TIMEOUT, self.transport.read_frame()).await {
+            Ok(Ok(frame)) => debug!(
+                "BWU: phone's last frame on the prior channel: {:?}",
+                OfflineFrame::decode(&*frame)
+                    .ok()
+                    .and_then(|f| f.v1)
+                    .map(|v| v.r#type())
+            ),
+            Ok(Err(e)) => debug!("BWU: prior channel closed: {e}"),
+            Err(_) => debug!("BWU: no DISCONNECTION from the phone on the prior channel"),
+        }
+
+        let prior = std::mem::replace(&mut self.transport, upgraded);
+        if prior.buffered() > 0 {
+            warn!(
+                "BWU: dropping {} unexpected bytes left on the prior channel",
+                prior.buffered()
+            );
+        }
+        info!("BWU: upgraded to Wi-Fi LAN, continuing over TCP");
+
+        Ok(())
+    }
+
+    /// Keeps serving the BLE channel until the phone's Wi-Fi connection
+    /// arrives. `None` when it won't: the phone gave up or took too long.
+    async fn wait_for_upgrade(
+        &mut self,
+        pending: &mut PendingUpgrade,
+    ) -> Result<Option<Transport>, anyhow::Error> {
+        let deadline = tokio::time::sleep(UPGRADE_TIMEOUT);
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                connection = pending.connection() => {
+                    if connection.is_some() {
+                        info!("BWU: phone connected over Wi-Fi");
+                    }
+                    return Ok(connection);
+                }
+                _ = &mut deadline => {
+                    warn!(
+                        "BWU: phone didn't connect over Wi-Fi within {}s, staying on BLE",
+                        UPGRADE_TIMEOUT.as_secs()
+                    );
+                    return Ok(None);
+                }
+                frame = self.transport.read_frame() => {
+                    let offline = self.decrypt_frame(&frame?).await?;
+                    if bwu::event(&offline) == Some(UpgradeEvent::UpgradeFailure) {
+                        warn!("BWU: phone couldn't connect over Wi-Fi, staying on BLE");
+                        return Ok(None);
+                    }
+                    self.process_offline_frame(offline).await?;
+                }
+            }
+        }
+    }
+
+    /// Reads the prior channel up to the phone's SAFE_TO_CLOSE. Frames it sent
+    /// before its LAST_WRITE are processed as usual, and its LAST_WRITE is
+    /// answered with our SAFE_TO_CLOSE.
+    async fn drain_prior_channel(&mut self) -> Result<(), anyhow::Error> {
+        loop {
+            let frame = match tokio::time::timeout(DRAIN_TIMEOUT, self.transport.read_frame()).await
+            {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(e)) => {
+                    warn!("BWU: prior channel closed before SAFE_TO_CLOSE: {e}");
+                    return Ok(());
+                }
+                Err(_) => {
+                    warn!("BWU: no SAFE_TO_CLOSE from the phone, switching anyway");
+                    return Ok(());
+                }
+            };
+
+            // We're committed to TCP by now, so don't let the old channel end the session.
+            let offline = match self.decrypt_frame(&frame).await {
+                Ok(offline) => offline,
+                Err(e) => {
+                    warn!("BWU: unreadable frame on the prior channel, switching: {e}");
+                    return Ok(());
+                }
+            };
+            match bwu::event(&offline) {
+                Some(UpgradeEvent::LastWriteToPriorChannel) => {
+                    debug!("BWU: phone's LAST_WRITE, answering SAFE_TO_CLOSE");
+                    if let Err(e) = self
+                        .encrypt_and_send(&bwu::event_frame(UpgradeEvent::SafeToClosePriorChannel))
+                        .await
+                    {
+                        debug!("BWU: couldn't send SAFE_TO_CLOSE: {e}");
+                    }
+                }
+                Some(UpgradeEvent::SafeToClosePriorChannel) => {
+                    debug!("BWU: phone's SAFE_TO_CLOSE");
+                    return Ok(());
+                }
+                Some(event) => debug!("BWU: ignoring {event:?} on the prior channel"),
+                None => self.process_offline_frame(offline).await?,
+            }
+        }
     }
 
     async fn disconnection(&mut self) -> Result<(), anyhow::Error> {
@@ -1236,5 +1505,360 @@ impl InboundRequest {
         // some spare time to process channel's message. Otherwise it
         // get spammed by new requests. Currently set to 10 micro secs.
         tokio::time::sleep(SANITY_DURATION).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::broadcast;
+
+    use super::*;
+    use crate::hdl::UpgradeRegistry;
+    use crate::location_nearby_connections::{
+        BandwidthUpgradeNegotiationFrame, ConnectionRequestFrame, ConnectionResponseFrame, V1Frame,
+        offline_frame, v1_frame,
+    };
+    use crate::securegcm::ukey2_client_init::CipherCommitment;
+    use crate::utils::{DeviceType, encode_endpoint_info};
+
+    /// The phone's side of a session, just enough to drive an upgrade.
+    struct Phone {
+        keys: crypto::SessionKeys,
+        send_seq: i32,
+        recv_seq: i32,
+    }
+
+    impl Phone {
+        /// Connects and runs UKEY2 over `ble`, up to the encrypted connection.
+        async fn connect(ble: &mut Transport) -> Self {
+            ble.write_frame(&v1(V1Frame {
+                r#type: Some(v1_frame::FrameType::ConnectionRequest.into()),
+                connection_request: Some(ConnectionRequestFrame {
+                    endpoint_id: Some("PHNE".into()),
+                    endpoint_info: Some(encode_endpoint_info(DeviceType::Phone, "Pixel")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+            let (secret_key, public_key) = crypto::gen_keypair();
+            let (x, y) = crypto::encode_public_key(&public_key);
+            let public_key = GenericPublicKey {
+                r#type: PublicKeyType::EcP256.into(),
+                ec_p256_public_key: Some(EcP256PublicKey { x, y }),
+                ..Default::default()
+            };
+            let finish = Ukey2Message {
+                message_type: Some(ukey2_message::Type::ClientFinish.into()),
+                message_data: Some(
+                    Ukey2ClientFinished {
+                        public_key: Some(public_key.encode_to_vec()),
+                    }
+                    .encode_to_vec(),
+                ),
+            }
+            .encode_to_vec();
+            let init = Ukey2Message {
+                message_type: Some(ukey2_message::Type::ClientInit.into()),
+                message_data: Some(
+                    Ukey2ClientInit {
+                        version: Some(1),
+                        random: Some(gen_random(32)),
+                        next_protocol: Some("AES_256_CBC-HMAC_SHA256".into()),
+                        cipher_commitments: vec![CipherCommitment {
+                            handshake_cipher: Some(Ukey2HandshakeCipher::P256Sha512.into()),
+                            commitment: Some(Sha512::digest(&finish).to_vec()),
+                        }],
+                    }
+                    .encode_to_vec(),
+                ),
+            }
+            .encode_to_vec();
+            ble.write_frame(&init).await.unwrap();
+
+            let server_init = ble.read_frame().await.unwrap();
+            let msg = Ukey2Message::decode(&*server_init).unwrap();
+            let server_key = Ukey2ServerInit::decode(msg.message_data()).unwrap();
+            let server_key = GenericPublicKey::decode(server_key.public_key())
+                .unwrap()
+                .ec_p256_public_key
+                .unwrap();
+            let server_key = crypto::decode_public_key(&server_key.x, &server_key.y).unwrap();
+            ble.write_frame(&finish).await.unwrap();
+
+            let keys = crypto::derive_session_keys(
+                &secret_key,
+                &server_key,
+                &init,
+                &server_init,
+                Role::Client,
+            )
+            .unwrap();
+
+            ble.write_frame(&v1(V1Frame {
+                r#type: Some(v1_frame::FrameType::ConnectionResponse.into()),
+                connection_response: Some(ConnectionResponseFrame::default()),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+            let response = OfflineFrame::decode(&*ble.read_frame().await.unwrap()).unwrap();
+            assert_eq!(
+                response.v1.unwrap().r#type(),
+                v1_frame::FrameType::ConnectionResponse
+            );
+
+            Self {
+                keys,
+                send_seq: 0,
+                recv_seq: 0,
+            }
+        }
+
+        async fn send(&mut self, transport: &mut Transport, frame: &OfflineFrame) {
+            self.send_seq += 1;
+            let d2d = DeviceToDeviceMessage {
+                sequence_number: Some(self.send_seq),
+                message: Some(frame.encode_to_vec()),
+            };
+            let iv = gen_random(16);
+            let hb = HeaderAndBody {
+                body: crypto::encrypt(&self.keys.encrypt_key, &iv, &d2d.encode_to_vec()).unwrap(),
+                header: Header {
+                    encryption_scheme: EncScheme::Aes256Cbc.into(),
+                    signature_scheme: SigScheme::HmacSha256.into(),
+                    iv: Some(iv),
+                    ..Default::default()
+                },
+            }
+            .encode_to_vec();
+            let smsg = SecureMessage {
+                signature: crypto::sign(&self.keys.send_hmac_key, &hb).unwrap(),
+                header_and_body: hb,
+            };
+            transport.write_frame(&smsg.encode_to_vec()).await.unwrap();
+        }
+
+        async fn recv(&mut self, transport: &mut Transport) -> OfflineFrame {
+            let smsg = SecureMessage::decode(&*transport.read_frame().await.unwrap()).unwrap();
+            crypto::verify(
+                &self.keys.recv_hmac_key,
+                &smsg.header_and_body,
+                &smsg.signature,
+            )
+            .unwrap();
+            let hb = HeaderAndBody::decode(&*smsg.header_and_body).unwrap();
+            let plain = crypto::decrypt(&self.keys.decrypt_key, hb.header.iv(), &hb.body).unwrap();
+            let d2d = DeviceToDeviceMessage::decode(&*plain).unwrap();
+
+            self.recv_seq += 1;
+            assert_eq!(d2d.sequence_number(), self.recv_seq);
+            OfflineFrame::decode(d2d.message()).unwrap()
+        }
+
+        /// Receives frames up to the first one that isn't a payload transfer.
+        async fn recv_control(&mut self, transport: &mut Transport) -> OfflineFrame {
+            loop {
+                let frame = self.recv(transport).await;
+                if frame.v1.as_ref().unwrap().r#type() != v1_frame::FrameType::PayloadTransfer {
+                    return frame;
+                }
+            }
+        }
+    }
+
+    fn v1(frame: V1Frame) -> Vec<u8> {
+        OfflineFrame {
+            version: Some(offline_frame::Version::V1.into()),
+            v1: Some(frame),
+        }
+        .encode_to_vec()
+    }
+
+    fn keep_alive() -> OfflineFrame {
+        OfflineFrame::decode(&*v1(V1Frame {
+            r#type: Some(v1_frame::FrameType::KeepAlive.into()),
+            keep_alive: Some(KeepAliveFrame { ack: Some(false) }),
+            ..Default::default()
+        }))
+        .unwrap()
+    }
+
+    fn bwu_event(event: UpgradeEvent) -> OfflineFrame {
+        OfflineFrame::decode(&*v1(V1Frame {
+            r#type: Some(v1_frame::FrameType::BandwidthUpgradeNegotiation.into()),
+            bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                event_type: Some(event.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .unwrap()
+    }
+
+    fn is_keep_alive(frame: &OfflineFrame) -> bool {
+        frame.v1.as_ref().unwrap().r#type() == v1_frame::FrameType::KeepAlive
+    }
+
+    /// A BLE session over an in-memory channel, offering the upgrade.
+    fn ble_session() -> (Transport, WifiLanUpgrade) {
+        let (ours, phone) = tokio::io::duplex(64 * 1024);
+        let upgrade = WifiLanUpgrade {
+            port: 4242,
+            registry: UpgradeRegistry::default(),
+        };
+        let (sender, _) = broadcast::channel(50);
+        tokio::spawn(
+            InboundRequest::new(Transport::new(ours), "ble-test".into(), sender)
+                .with_wifi_lan_upgrade(upgrade.clone())
+                .run(None),
+        );
+
+        (Transport::new(phone), upgrade)
+    }
+
+    #[tokio::test]
+    async fn ble_session_upgrades_to_wifi_lan() {
+        if lan_ipv4().is_none() {
+            eprintln!("no LAN address on this machine, skipping");
+            return;
+        }
+
+        let (mut ble, upgrade) = ble_session();
+        let mut phone = Phone::connect(&mut ble).await;
+
+        // The paired key encryption, then the upgrade offer.
+        let offer = phone.recv_control(&mut ble).await;
+        assert_eq!(bwu::event(&offer), Some(UpgradeEvent::UpgradePathAvailable));
+        let path = offer
+            .v1
+            .unwrap()
+            .bandwidth_upgrade_negotiation
+            .unwrap()
+            .upgrade_path_info
+            .unwrap();
+        assert_eq!(path.wifi_lan_socket.unwrap().wifi_port(), 4242);
+
+        // Still served over BLE while the phone comes over.
+        phone.send(&mut ble, &keep_alive()).await;
+        assert!(is_keep_alive(&phone.recv(&mut ble).await));
+
+        // What the TCP server does with a CLIENT_INTRODUCTION.
+        let (tcp_ours, tcp_phone) = tokio::io::duplex(64 * 1024);
+        let mut tcp = Transport::new(tcp_phone);
+        assert!(upgrade.registry.deliver("PHNE", Transport::new(tcp_ours)));
+        let ack = OfflineFrame::decode(&*tcp.read_frame().await.unwrap()).unwrap();
+        assert_eq!(bwu::event(&ack), Some(UpgradeEvent::ClientIntroductionAck));
+
+        // Draining: a frame sent before the phone's LAST_WRITE is still processed.
+        phone.send(&mut ble, &keep_alive()).await;
+        phone
+            .send(&mut ble, &bwu_event(UpgradeEvent::LastWriteToPriorChannel))
+            .await;
+        assert_eq!(
+            bwu::event(&phone.recv(&mut ble).await),
+            Some(UpgradeEvent::LastWriteToPriorChannel)
+        );
+        assert!(is_keep_alive(&phone.recv(&mut ble).await));
+        assert_eq!(
+            bwu::event(&phone.recv(&mut ble).await),
+            Some(UpgradeEvent::SafeToClosePriorChannel)
+        );
+        phone
+            .send(&mut ble, &bwu_event(UpgradeEvent::SafeToClosePriorChannel))
+            .await;
+
+        // Plaintext DISCONNECTION both ways, then BLE is dropped.
+        let disconnection = OfflineFrame::decode(&*ble.read_frame().await.unwrap()).unwrap();
+        assert_eq!(
+            disconnection.v1.unwrap().r#type(),
+            v1_frame::FrameType::Disconnection
+        );
+        ble.write_frame(&bwu::prior_channel_disconnection().encode_to_vec())
+            .await
+            .unwrap();
+        assert!(ble.read_frame().await.is_err());
+
+        // Same keys, and sequence numbers carry on over TCP.
+        phone.send(&mut tcp, &keep_alive()).await;
+        assert!(is_keep_alive(&phone.recv(&mut tcp).await));
+    }
+
+    #[tokio::test]
+    async fn ble_session_stays_on_ble_when_the_phone_cannot_upgrade() {
+        if lan_ipv4().is_none() {
+            eprintln!("no LAN address on this machine, skipping");
+            return;
+        }
+
+        let (mut ble, upgrade) = ble_session();
+        let mut phone = Phone::connect(&mut ble).await;
+        let offer = phone.recv_control(&mut ble).await;
+        assert_eq!(bwu::event(&offer), Some(UpgradeEvent::UpgradePathAvailable));
+
+        phone
+            .send(&mut ble, &bwu_event(UpgradeEvent::UpgradeFailure))
+            .await;
+        phone.send(&mut ble, &keep_alive()).await;
+        assert!(is_keep_alive(&phone.recv(&mut ble).await));
+
+        // Nobody waits for the phone anymore.
+        let (tcp_ours, _) = tokio::io::duplex(16);
+        assert!(!upgrade.registry.deliver("PHNE", Transport::new(tcp_ours)));
+    }
+
+    #[test]
+    fn wifi_credentials_wpa_psk() {
+        let creds = WifiCredentials {
+            password: Some("testpass123".to_string()),
+            hidden_ssid: Some(false),
+        };
+        let encoded = creds.encode_to_vec();
+
+        let decoded = WifiCredentials::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.password, Some("testpass123".to_string()));
+        assert_eq!(decoded.hidden_ssid, Some(false));
+    }
+
+    #[test]
+    fn wifi_credentials_open_network() {
+        let creds = WifiCredentials {
+            password: Some("".to_string()),
+            hidden_ssid: Some(false),
+        };
+        let encoded = creds.encode_to_vec();
+
+        let decoded = WifiCredentials::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.password, Some("".to_string()));
+        assert_eq!(decoded.hidden_ssid, Some(false));
+    }
+
+    #[test]
+    fn wifi_credentials_hidden_network() {
+        let creds = WifiCredentials {
+            password: Some("secretpass".to_string()),
+            hidden_ssid: Some(true),
+        };
+        let encoded = creds.encode_to_vec();
+
+        let decoded = WifiCredentials::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.password, Some("secretpass".to_string()));
+        assert_eq!(decoded.hidden_ssid, Some(true));
+    }
+
+    #[test]
+    fn wifi_credentials_sae() {
+        // WPA3 SAE networks also use password format
+        let creds = WifiCredentials {
+            password: Some("wpa3pass".to_string()),
+            hidden_ssid: Some(false),
+        };
+        let encoded = creds.encode_to_vec();
+
+        let decoded = WifiCredentials::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.password, Some("wpa3pass".to_string()));
+        assert_eq!(decoded.hidden_ssid, Some(false));
     }
 }

@@ -28,9 +28,12 @@ pub enum Visibility {
 pub struct MDnsServer {
     daemon: ServiceDaemon,
     service_info: ServiceInfo,
+    endpoint_id: [u8; 4],
+    service_port: u16,
     ble_receiver: Receiver<()>,
     visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
     visibility_receiver: watch::Receiver<Visibility>,
+    device_name_receiver: watch::Receiver<String>,
 }
 
 impl MDnsServer {
@@ -40,8 +43,10 @@ impl MDnsServer {
         ble_receiver: Receiver<()>,
         visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
         visibility_receiver: watch::Receiver<Visibility>,
+        device_name_receiver: watch::Receiver<String>,
     ) -> Result<Self, anyhow::Error> {
-        let service_info = Self::build_service(endpoint_id, service_port, DeviceType::Laptop)?;
+        let service_info =
+            Self::build_service(endpoint_id, service_port, DeviceType::Laptop, &hostname())?;
 
         // The TCP listener is IPv4-only, so only announce IPv4 addresses.
         let daemon = ServiceDaemon::new()?;
@@ -50,9 +55,12 @@ impl MDnsServer {
         Ok(Self {
             daemon,
             service_info,
+            endpoint_id,
+            service_port,
             ble_receiver,
             visibility_sender,
             visibility_receiver,
+            device_name_receiver,
         })
     }
 
@@ -87,6 +95,29 @@ impl MDnsServer {
                     } else if visibility == Visibility::Temporarily {
                         self.daemon.register(self.service_info.clone())?;
                         interval.reset();
+                    }
+                }
+                _ = self.device_name_receiver.changed() => {
+                    let device_name = self.device_name_receiver.borrow_and_update().clone();
+                    debug!("{INNER_NAME}: device name changed: {device_name}");
+
+                    // Unregister the old service if currently visible
+                    if visibility != Visibility::Invisible {
+                        let receiver = self.daemon.unregister(self.service_info.get_fullname())?;
+                        let _ = receiver.recv_async().await;
+                    }
+
+                    // Rebuild service with new device name
+                    self.service_info = Self::build_service(
+                        self.endpoint_id,
+                        self.service_port,
+                        DeviceType::Laptop,
+                        &device_name,
+                    )?;
+
+                    // Re-register if currently visible
+                    if visibility != Visibility::Invisible {
+                        self.daemon.register(self.service_info.clone())?;
                     }
                 }
                 _ = ble_receiver.recv() => {
@@ -129,17 +160,17 @@ impl MDnsServer {
         endpoint_id: [u8; 4],
         service_port: u16,
         device_type: DeviceType,
+        device_name: &str,
     ) -> Result<ServiceInfo, anyhow::Error> {
         let name = gen_mdns_name(endpoint_id);
-        let hostname = hostname();
-        info!("Broadcasting with: {hostname}");
-        let endpoint_info = URL_SAFE_NO_PAD.encode(encode_endpoint_info(device_type, &hostname));
+        info!("Broadcasting with: {device_name}");
+        let endpoint_info = URL_SAFE_NO_PAD.encode(encode_endpoint_info(device_type, device_name));
 
         let properties = [("n", endpoint_info)];
         let si = ServiceInfo::new(
             "_FC9F5ED42C8A._tcp.local.",
             &name,
-            &mdns_host_name(&hostname),
+            &mdns_host_name(device_name),
             "",
             service_port,
             &properties[..],

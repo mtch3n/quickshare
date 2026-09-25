@@ -6,6 +6,7 @@ import type { ChannelMessage } from "@bindings/ChannelMessage"
 import type { EndpointInfo } from "@bindings/EndpointInfo"
 import type { SendInfo } from "@bindings/SendInfo"
 import type { Visibility } from "@bindings/Visibility"
+import type { WifiNetwork } from "@bindings/WifiNetwork"
 
 export type Settings = {
   deviceName: string
@@ -13,6 +14,9 @@ export type Settings = {
   downloadPath: string
   keepRunning: boolean
   fileManagerIntegration: boolean
+  trustedDevices: string[]
+  autoOpenLinks: boolean
+  autoCopyText: boolean
 }
 
 /** Commands implemented in src-tauri/src/commands.rs. */
@@ -22,6 +26,8 @@ export const api = {
     invoke<void>("set_visibility", { visibility }),
   setDownloadPath: (path: string | null) =>
     invoke<void>("set_download_path", { path }),
+  setDeviceName: (name: string | null) =>
+    invoke<void>("set_device_name", { name }),
   setKeepRunning: (enabled: boolean) =>
     invoke<void>("set_keep_running", { enabled }),
   setFileManagerIntegration: (enabled: boolean) =>
@@ -32,6 +38,14 @@ export const api = {
   transferAction: (id: string, action: ChannelAction) =>
     invoke<void>("transfer_action", { id, action }),
   takePendingFiles: () => invoke<string[]>("take_pending_files"),
+  connectWifi: (network: WifiNetwork) =>
+    invoke<void>("connect_wifi", { network }),
+  trustDevice: (name: string) => invoke<void>("trust_device", { name }),
+  untrustDevice: (name: string) => invoke<void>("untrust_device", { name }),
+  setAutoOpenLinks: (enabled: boolean) =>
+    invoke<void>("set_auto_open_links", { enabled }),
+  setAutoCopyText: (enabled: boolean) =>
+    invoke<void>("set_auto_copy_text", { enabled }),
 }
 
 /** Events emitted by src-tauri/src/main.rs and tray.rs. */
@@ -39,7 +53,9 @@ type Events = {
   rs2js_channelmessage: ChannelMessage
   rs2js_endpointinfo: EndpointInfo
   visibility_updated: Visibility
+  device_name_updated: string
   send_files: string[]
+  send_text: string
   pick_files: null
 }
 
