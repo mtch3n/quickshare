@@ -5,8 +5,10 @@ import {
   CopyIcon,
   ExternalLinkIcon,
   FolderOpenIcon,
+  WifiIcon,
   XIcon,
 } from "lucide-react"
+import { useState } from "react"
 
 import { DeviceIcon } from "@/components/device-icon"
 import { Button } from "@/components/ui/button"
@@ -20,11 +22,13 @@ import {
   ItemTitle,
 } from "@/components/ui/item"
 import { Progress } from "@/components/ui/progress"
+import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/components/ui/toast"
 import { type Transfer, isTerminal, useQuickShare } from "@/hooks/quick-share"
 import { percent } from "@/lib/format"
 import { describeContent } from "@/lib/transfer"
 import { api } from "@/lib/tauri"
+import type { WifiNetwork } from "@bindings/WifiNetwork"
 
 function status(transfer: Transfer) {
   const what = describeContent(transfer)
@@ -63,11 +67,25 @@ async function copy(text: string) {
   }
 }
 
+async function connectToWifi(network: WifiNetwork) {
+  try {
+    await api.connectWifi(network)
+    toast.add({ title: "Connected to Wi-Fi", type: "success" })
+  } catch (e) {
+    toast.add({
+      title: "Couldn't connect",
+      description: String(e),
+      type: "error",
+    })
+  }
+}
+
 export function TransferItem({ transfer }: { transfer: Transfer }) {
   const { dismiss } = useQuickShare()
   const { id, state, meta, direction } = transfer
   const active = state === "ReceivingFiles" || state === "SendingFiles"
   const text = meta?.text_payload
+  const [connectingWifi, setConnectingWifi] = useState(false)
 
   return (
     <Item variant="outline" size="sm" role="listitem">
@@ -138,6 +156,34 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
               Open folder
             </Button>
           )}
+        {state === "Finished" && meta?.text_type === "Wifi" && meta?.wifi && (
+          <>
+            <Button
+              size="sm"
+              disabled={connectingWifi}
+              onClick={async () => {
+                setConnectingWifi(true)
+                await connectToWifi(meta.wifi!)
+                setConnectingWifi(false)
+              }}
+            >
+              {connectingWifi ? (
+                <Spinner className="h-4 w-4" />
+              ) : (
+                <WifiIcon data-icon="inline-start" />
+              )}
+              Connect
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => copy(meta.wifi!.password)}
+            >
+              <CopyIcon data-icon="inline-start" />
+              Copy password
+            </Button>
+          </>
+        )}
         {isTerminal(state) && (
           <Button
             variant="ghost"

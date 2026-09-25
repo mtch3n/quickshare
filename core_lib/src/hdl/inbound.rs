@@ -12,7 +12,7 @@ use super::transport::Transport;
 use super::{InnerState, State};
 use crate::channel::{ChannelAction, ChannelDirection, ChannelMessage};
 use crate::errors::AppError;
-use crate::hdl::info::{InternalFileInfo, TransferMetadata};
+use crate::hdl::info::{InternalFileInfo, TransferMetadata, WifiNetwork, WifiSecurity};
 use crate::hdl::{TextPayloadInfo, TextPayloadType};
 use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType as UpgradeEvent;
 use crate::location_nearby_connections::payload_transfer_frame::control_message::EventType as ControlEvent;
@@ -29,7 +29,9 @@ use crate::securemessage::{
     EcP256PublicKey, EncScheme, GenericPublicKey, Header, HeaderAndBody, PublicKeyType,
     SecureMessage, SigScheme,
 };
-use crate::sharing_nearby::{paired_key_result_frame, text_metadata};
+use crate::sharing_nearby::{
+    WifiCredentials, paired_key_result_frame, text_metadata, wifi_credentials_metadata,
+};
 use crate::utils::{
     RemoteDeviceInfo, create_unique_file, gen_random, get_download_dir, lan_ipv4,
     parse_endpoint_info, sanitize_file_name,
@@ -606,13 +608,42 @@ impl InboundRequest {
                                         )
                                         .await;
                                     }
-                                    TextPayloadInfo::Wifi((_, ssid)) => {
+                                    TextPayloadInfo::Wifi((_, ssid, security_type)) => {
+                                        let wifi_network = WifiCredentials::decode(buffer.as_slice())
+                                            .ok()
+                                            .and_then(|creds| {
+                                                let security = match security_type {
+                                                    wifi_credentials_metadata::SecurityType::Open => {
+                                                        WifiSecurity::Open
+                                                    }
+                                                    wifi_credentials_metadata::SecurityType::WpaPsk => {
+                                                        WifiSecurity::WpaPsk
+                                                    }
+                                                    wifi_credentials_metadata::SecurityType::Wep => {
+                                                        WifiSecurity::Wep
+                                                    }
+                                                    wifi_credentials_metadata::SecurityType::Sae => {
+                                                        WifiSecurity::Sae
+                                                    }
+                                                    wifi_credentials_metadata::SecurityType::UnknownSecurityType => {
+                                                        return None;
+                                                    }
+                                                };
+
+                                                Some(WifiNetwork {
+                                                    ssid: ssid.clone(),
+                                                    password: creds.password.unwrap_or_default(),
+                                                    security,
+                                                    hidden: creds.hidden_ssid.unwrap_or(false),
+                                                })
+                                            });
+
                                         self.update_state(
                                             |e| {
                                                 if let Some(tmd) = e.transfer_metadata.as_mut() {
-                                                    tmd.text_payload =
-                                                        Some(format!("{ssid}: {}", payload.trim()));
+                                                    tmd.text_payload = Some(ssid.clone());
                                                     tmd.text_type = Some(TextPayloadType::Wifi);
+                                                    tmd.wifi = wifi_network;
                                                 }
                                             },
                                             false,
@@ -960,6 +991,7 @@ impl InboundRequest {
                     e.text_payload = Some(TextPayloadInfo::Wifi((
                         meta.payload_id(),
                         meta.ssid().to_owned(),
+                        meta.security_type(),
                     )));
                     e.transfer_metadata = Some(metadata);
                 },
@@ -1757,5 +1789,58 @@ mod tests {
         // Nobody waits for the phone anymore.
         let (tcp_ours, _) = tokio::io::duplex(16);
         assert!(!upgrade.registry.deliver("PHNE", Transport::new(tcp_ours)));
+    }
+
+    #[test]
+    fn wifi_credentials_wpa_psk() {
+        let creds = WifiCredentials {
+            password: Some("testpass123".to_string()),
+            hidden_ssid: Some(false),
+        };
+        let encoded = creds.encode_to_vec();
+
+        let decoded = WifiCredentials::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.password, Some("testpass123".to_string()));
+        assert_eq!(decoded.hidden_ssid, Some(false));
+    }
+
+    #[test]
+    fn wifi_credentials_open_network() {
+        let creds = WifiCredentials {
+            password: Some("".to_string()),
+            hidden_ssid: Some(false),
+        };
+        let encoded = creds.encode_to_vec();
+
+        let decoded = WifiCredentials::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.password, Some("".to_string()));
+        assert_eq!(decoded.hidden_ssid, Some(false));
+    }
+
+    #[test]
+    fn wifi_credentials_hidden_network() {
+        let creds = WifiCredentials {
+            password: Some("secretpass".to_string()),
+            hidden_ssid: Some(true),
+        };
+        let encoded = creds.encode_to_vec();
+
+        let decoded = WifiCredentials::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.password, Some("secretpass".to_string()));
+        assert_eq!(decoded.hidden_ssid, Some(true));
+    }
+
+    #[test]
+    fn wifi_credentials_sae() {
+        // WPA3 SAE networks also use password format
+        let creds = WifiCredentials {
+            password: Some("wpa3pass".to_string()),
+            hidden_ssid: Some(false),
+        };
+        let encoded = creds.encode_to_vec();
+
+        let decoded = WifiCredentials::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.password, Some("wpa3pass".to_string()));
+        assert_eq!(decoded.hidden_ssid, Some(false));
     }
 }

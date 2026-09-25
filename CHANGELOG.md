@@ -11,6 +11,7 @@ First release of this fork (mtch3n/quickshare). Linux only, distributed as an Ap
 * Tray icon uses StatusNotifierItem: follows the panel colour, opens on click, and shows when a transfer is waiting
 * New SVG app icon, with symbolic and attention variants
 * Transfers can be received while a send is in progress
+* Connect to received Wi-Fi networks with one click (NetworkManager)
 * Experimental: receive from phones that turn Wi-Fi off while sharing (Pixel 10, Galaxy S26 with *Share with Apple devices*) over Bluetooth LE, moving the transfer to Wi-Fi LAN when possible (#425)
 
 ### Bug Fixes

@@ -26,6 +26,7 @@ mod hdl;
 mod manager;
 mod utils;
 
+pub use hdl::info::{WifiNetwork, WifiSecurity};
 pub use hdl::{EndpointInfo, OutboundPayload, State, Visibility};
 pub use manager::SendInfo;
 pub use utils::{DeviceType, get_download_dir, hostname};

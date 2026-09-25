@@ -20,6 +20,7 @@ mod logger;
 mod notification;
 mod store;
 mod tray;
+mod wifi;
 
 /// Passed by the autostart entry so the app starts in the tray.
 const HIDDEN_ARG: &str = "--hidden";
@@ -103,6 +104,7 @@ fn run() -> Result<(), anyhow::Error> {
             commands::send_payload,
             commands::transfer_action,
             commands::take_pending_files,
+            commands::connect_wifi,
         ])
         .setup(move |app| {
             set_up_logging(app.app_handle())?;

@@ -7,6 +7,25 @@ use ts_rs::TS;
 use super::TextPayloadType;
 use crate::utils::RemoteDeviceInfo;
 
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub password: String,
+    pub security: WifiSecurity,
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum WifiSecurity {
+    Open,
+    WpaPsk,
+    Wep,
+    Sae,
+}
+
 #[derive(Debug)]
 pub struct InternalFileInfo {
     pub payload_id: i64,
@@ -28,6 +47,7 @@ pub struct TransferMetadata {
     pub text_type: Option<TextPayloadType>,
     pub text_description: Option<String>,
     pub text_payload: Option<String>,
+    pub wifi: Option<WifiNetwork>,
 
     #[ts(type = "number")]
     pub total_bytes: u64,
