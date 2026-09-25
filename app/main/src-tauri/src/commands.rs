@@ -17,6 +17,9 @@ pub struct Settings {
     download_path: String,
     keep_running: bool,
     file_manager_integration: bool,
+    trusted_devices: Vec<String>,
+    auto_open_links: bool,
+    auto_copy_text: bool,
 }
 
 #[tauri::command]
@@ -27,6 +30,9 @@ pub fn get_settings(app: AppHandle) -> Settings {
         download_path: rqs_lib::get_download_dir().to_string_lossy().into_owned(),
         keep_running: store::keep_running(&app),
         file_manager_integration: integrations::installed(&app),
+        trusted_devices: store::trusted_devices(&app),
+        auto_open_links: store::auto_open_links(&app),
+        auto_copy_text: store::auto_copy_text(&app),
     }
 }
 
@@ -103,4 +109,30 @@ pub fn send_action(state: &AppState, id: String, action: ChannelAction) {
         action: Some(action),
         ..Default::default()
     });
+}
+
+#[tauri::command]
+pub fn trust_device(name: String, app: AppHandle) {
+    let mut devices = store::trusted_devices(&app);
+    if !devices.contains(&name) {
+        devices.push(name);
+        store::set_trusted_devices(&app, &devices);
+    }
+}
+
+#[tauri::command]
+pub fn untrust_device(name: String, app: AppHandle) {
+    let mut devices = store::trusted_devices(&app);
+    devices.retain(|d| d != &name);
+    store::set_trusted_devices(&app, &devices);
+}
+
+#[tauri::command]
+pub fn set_auto_open_links(enabled: bool, app: AppHandle) {
+    store::set_auto_open_links(&app, enabled);
+}
+
+#[tauri::command]
+pub fn set_auto_copy_text(enabled: bool, app: AppHandle) {
+    store::set_auto_copy_text(&app, enabled);
 }
