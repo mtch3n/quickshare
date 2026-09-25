@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.12.0 (unreleased)
+
+First release of this fork (mtch3n/quickshare). Linux only, distributed as an AppImage.
+
+### Features
+
+* New, simpler interface built with React and shadcn/ui, with light and dark themes
+* "Send with Quick Share" in the Nautilus, Dolphin and Nemo context menus; `--send FILE...` on the command line
+* Tray icon uses StatusNotifierItem: follows the panel colour, opens on click, and shows when a transfer is waiting
+* New SVG app icon, with symbolic and attention variants
+* Transfers can be received while a send is in progress
+
+### Bug Fixes
+
+* Received file names can no longer escape the download folder (path traversal)
+* Existing files are never overwritten; duplicates are named `name (1).ext`
+* Devices that hide their name (17-byte endpoint info) are no longer ignored (#431)
+* About 1 in 128 handshakes failed on public keys with a leading zero byte
+* Frames could be lost when a progress update interrupted a read
+* The sender no longer closes the connection before the receiver has everything
+* A cancel from the sender removes the partial files
+* UKEY2 alert frames had the wrong message type
+* Bluetooth scanning is passive when BlueZ allows it (`Experimental = true`), so it doesn't disturb audio or input devices (#168, #369, #429)
+* The close button works on Wayland (#422)
+* The AppImage no longer bundles Wayland libraries that made WebKitGTK abort (blank window) on current distributions (#390, #357)
+* Copy works on Wayland compositors without XWayland clipboard sync (#423)
+* The log file is capped (#268)
+* Start at login is off by default (#440)
+
+### Miscellaneous
+
+* Updated to Tauri 2.11, prost 0.14, current RustCrypto crates and upstream mdns-sd; Rust 2024 edition
+* Removed macOS support, the update checker, and unused code
+
 ## [0.11.5](https://github.com/Martichou/rquickshare/compare/v0.11.4...v0.11.5) (2025-02-23)
 
 

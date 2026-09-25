@@ -1,51 +1,59 @@
-The project is divided into two parts:
+# Building
 
-- **core_lib:** This is a Rust library that encompasses all the logic necessary for discovering, connecting to, and transferring files to QuickShare-compatible clients.
-- **app/main:** A Tauri application that utilizes core_lib to handle incoming requests and initiate outgoing ones.
+The repository is a Cargo workspace with two crates, plus a web frontend:
 
-How to build
---------------------------
+- `core_lib`: the Quick Share protocol (discovery, encryption, transfers).
+- `app/main/src-tauri`: the Tauri desktop app built on `core_lib`.
+- `app/main`: the React + shadcn/ui frontend.
 
-### core_lib
+## Requirements
 
-Building the core_lib is straightforward because it is a basic Rust project.
+- Rust: `rustup` installs the version pinned in `rust-toolchain.toml`.
+- Node.js 22+ and pnpm (the version is pinned in `app/main/package.json`).
+- `protoc` (protobuf compiler)
+- WebKitGTK 4.1, GTK 3, D-Bus and librsvg development files
 
-Install `protobuf-compiler` system package, and then simply run `cargo build` or `cargo build --release` from `core_lib` folder.
+On Arch:
 
-### app/main
-
-The app/main is developed as a Tauri application. For package management, pnpm is recommended (though npm and others may also work, pnpm is preferred for this project).
-
-(all commands are run inside the `app/main` folder)
-
-First, install the necessary dependencies:
-
+```bash
+sudo pacman -S --needed protobuf webkit2gtk-4.1 gtk3 librsvg dbus
 ```
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt install protobuf-compiler libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libdbus-1-dev
+```
+
+## Run and build
+
+All commands run from `app/main`:
+
+```bash
 pnpm install
+pnpm tauri dev                        # run with hot reload
+pnpm tauri build --bundles appimage   # build the AppDir into target/release/bundle/appimage
 ```
 
-- To run the debug version:
+Then repack it without the bundled Wayland libraries (they make WebKitGTK
+abort on current distributions):
 
-```
-pnpm dev
-```
-
-- To build a release package (.deb & .AppImage & .rpm & .dmg (only on macos)):
-
-```
-pnpm build
+```bash
+src-tauri/linux/repack-appimage.sh ../../target/release/bundle/appimage/rquickshare.AppDir RQuickShare.AppImage
 ```
 
-For more detailed information on building the app/main and understanding any potential limitations, it’s advised to consult the [Tauri documentation](https://v2.tauri.app/start).
+## Checks
 
-### app/main
+These are the checks CI runs:
 
-Everything is the same as the app/main one, except the output of the build :)
-
-- To build a release package (.deb & .AppImage):
-
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                # also regenerates core_lib/bindings (TypeScript types)
+cd app/main && pnpm lint && pnpm build
 ```
-pnpm build
-```
 
-For more detailed information on building the app/main and understanding any potential limitations, it’s advised to consult the [Tauri documentation](https://tauri.app/v1/guides/building/linux).
+## Icons
+
+The icons are drawn in `app/main/src-tauri/icons/src/*.svg`. After editing them,
+run `app/main/src-tauri/icons/render.sh` to regenerate the PNGs.
