@@ -16,9 +16,37 @@ fn base() -> Notification {
     n
 }
 
-pub fn send_request_notification(name: String, id: String, app_handle: &AppHandle) {
+/// Describes what a transfer carries, e.g. "photo.jpg", "4 files" or "a link".
+fn content_summary(files: Option<&[String]>, text_type: Option<&str>) -> String {
+    match files {
+        Some([file]) => file.clone(),
+        Some(files) if !files.is_empty() => format!("{} files", files.len()),
+        _ => match text_type {
+            Some("Url") => "a link".to_string(),
+            Some("Text") => "some text".to_string(),
+            Some("Wifi") => "Wi-Fi info".to_string(),
+            _ => "content".to_string(),
+        },
+    }
+}
+
+pub fn send_request_notification(
+    name: String,
+    pin_code: Option<String>,
+    files: Option<Vec<String>>,
+    text_type: Option<String>,
+    id: String,
+    app_handle: &AppHandle,
+) {
+    let content = content_summary(files.as_deref(), text_type.as_deref());
+    let body = match pin_code {
+        Some(pin) => format!("Wants to send {content}\nPIN: {pin}"),
+        None => format!("Wants to send {content}"),
+    };
+
     let shown = base()
-        .body(&format!("{name} wants to share with you"))
+        .summary(&format!("Incoming from {name}"))
+        .body(&body)
         .urgency(Urgency::Critical)
         .action("default", "Open")
         .action("accept", "Accept")
@@ -77,22 +105,7 @@ pub fn send_received_notification(
     text_payload: Option<String>,
     app_handle: &AppHandle,
 ) {
-    let body = if let Some(files) = &files {
-        if files.is_empty() {
-            match text_type.as_deref() {
-                Some("Url") => "a link".to_string(),
-                Some("Text") => "some text".to_string(),
-                Some("Wifi") => "Wi-Fi info".to_string(),
-                _ => "content".to_string(),
-            }
-        } else if files.len() == 1 {
-            files[0].clone()
-        } else {
-            format!("{} files", files.len())
-        }
-    } else {
-        "content".to_string()
-    };
+    let body = content_summary(files.as_deref(), text_type.as_deref());
 
     let has_url = text_type.as_deref() == Some("Url");
     let has_text = text_type.as_deref() == Some("Text");

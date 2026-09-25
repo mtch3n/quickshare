@@ -198,6 +198,8 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
         let mut receiver = state.message_sender.subscribe();
         let mut handled_finished: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut notified_requests: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         loop {
             match receiver.recv().await {
@@ -232,7 +234,18 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                             continue;
                         }
 
-                        send_request_notification(name, info.id.clone(), &capp_handle);
+                        if notified_requests.insert(info.id.clone()) {
+                            open_main_window(&capp_handle);
+                            let meta = info.meta.as_ref();
+                            send_request_notification(
+                                name,
+                                meta.and_then(|m| m.pin_code.clone()),
+                                meta.and_then(|m| m.files.clone()),
+                                meta.and_then(|m| m.text_type.as_ref().map(|t| format!("{t:?}"))),
+                                info.id.clone(),
+                                &capp_handle,
+                            );
+                        }
                     }
 
                     // Auto-open links, auto-copy text, and show received notification on Finished
