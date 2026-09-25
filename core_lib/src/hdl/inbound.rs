@@ -10,6 +10,7 @@ use super::crypto::{self, Role};
 use super::transport::Transport;
 use super::{InnerState, State};
 use crate::channel::{ChannelAction, ChannelDirection, ChannelMessage};
+use crate::errors::AppError;
 use crate::hdl::info::{InternalFileInfo, TransferMetadata};
 use crate::hdl::{TextPayloadInfo, TextPayloadType};
 use crate::location_nearby_connections::payload_transfer_frame::control_message::EventType as ControlEvent;
@@ -60,6 +61,36 @@ impl InboundRequest {
             },
             sender,
             receiver,
+        }
+    }
+
+    /// Drives the connection until it ends, reporting an unexpected
+    /// disconnection to the frontend.
+    pub async fn run(mut self) {
+        loop {
+            let Err(e) = self.handle().await else {
+                continue;
+            };
+
+            if matches!(e.downcast_ref(), Some(AppError::NotAnError))
+                || self.state.state == State::Initial
+            {
+                break;
+            }
+
+            if self.state.state != State::Finished {
+                let _ = self.sender.send(ChannelMessage {
+                    id: self.state.id.clone(),
+                    direction: ChannelDirection::LibToFront,
+                    state: Some(State::Disconnected),
+                    ..Default::default()
+                });
+            }
+            error!(
+                "inbound: error while handling {}: {e} ({:?})",
+                self.state.id, self.state.state
+            );
+            break;
         }
     }
 
@@ -697,7 +728,15 @@ impl InboundRequest {
             }
             State::ReceivedPairedKeyResult => {
                 debug!("Processing State::ReceivedPairedKeyResult");
-                self.process_introduction(v1_frame).await?;
+                // Newer Pixels send other frames before the introduction.
+                if v1_frame.introduction.is_some() {
+                    self.process_introduction(v1_frame).await?;
+                } else {
+                    debug!(
+                        "Awaiting introduction, ignoring {:?} frame",
+                        v1_frame.r#type()
+                    );
+                }
             }
             _ => {
                 info!(

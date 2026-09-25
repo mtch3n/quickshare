@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::hdl::{BleListener, MDnsServer};
+use crate::hdl::{BleListener, GattServer, MDnsServer, ReceiverAdvertiser, receiver_advertisement};
 use crate::manager::TcpServer;
 
 pub mod channel;
@@ -142,6 +142,26 @@ impl RQS {
         )?;
         let ctk = ctoken.clone();
         tracker.spawn(async move { mdns.run(ctk).await });
+
+        // Receiving from phones that left Wi-Fi to share: a BLE advertisement
+        // (same endpoint id as mDNS) and the GATT socket it leads to. Set up in
+        // the background so a slow bluetoothd can't hold up the Wi-Fi side.
+        let advertisement = receiver_advertisement(endpoint_id[..4].try_into()?, &hostname());
+        let sender = self.message_sender.clone();
+        let visibility = self.visibility_receiver.clone();
+        let ctk = ctoken.clone();
+        tracker.spawn(async move {
+            let gatt = match GattServer::new(advertisement.clone(), sender).await {
+                Ok(gatt) => gatt,
+                Err(e) => {
+                    warn!("Receiving over Bluetooth unavailable: {e}");
+                    return;
+                }
+            };
+            let advertiser =
+                ReceiverAdvertiser::new(gatt.adapter().clone(), advertisement, visibility);
+            tokio::join!(advertiser.run(ctk.clone()), gatt.run(ctk));
+        });
 
         tracker.close();
 

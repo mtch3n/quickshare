@@ -13,6 +13,8 @@ pub use ble::*;
 mod blea;
 pub use blea::*;
 mod crypto;
+mod gatt;
+pub use gatt::GattServer;
 mod transport;
 pub use transport::Transport;
 mod inbound;

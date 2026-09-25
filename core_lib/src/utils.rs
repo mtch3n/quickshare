@@ -73,6 +73,9 @@ pub fn parse_endpoint_info(info: &[u8]) -> Result<(DeviceType, Option<String>), 
     ))
 }
 
+/// First 3 bytes of SHA-256("NearbySharing"), the Quick Share service id.
+pub const SERVICE_ID_HASH: [u8; 3] = [0xFC, 0x9F, 0x5E];
+
 pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
     let mut name_b = Vec::new();
 
@@ -81,8 +84,7 @@ pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
 
     name_b.extend_from_slice(&endpoint_id);
 
-    let service_id: [u8; 3] = [0xFC, 0x9F, 0x5E];
-    name_b.extend_from_slice(&service_id);
+    name_b.extend_from_slice(&SERVICE_ID_HASH);
 
     let unknown_bytes: [u8; 2] = [0x00, 0x00];
     name_b.extend_from_slice(&unknown_bytes);
@@ -188,6 +190,13 @@ pub fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_id_hash_matches_nearby_sharing() {
+        use sha2::{Digest, Sha256};
+
+        assert_eq!(Sha256::digest(b"NearbySharing")[..3], SERVICE_ID_HASH);
+    }
 
     #[test]
     fn endpoint_info_roundtrip() {

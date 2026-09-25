@@ -69,37 +69,8 @@ impl TcpServer {
                     match r {
                         Ok((socket, remote_addr)) => {
                             trace!("{INNER_NAME}: new client: {remote_addr}");
-                            let esender = self.sender.clone();
-                            let csender = self.sender.clone();
-
-                            tokio::spawn(async move {
-                                let mut ir = InboundRequest::new(Transport::new(socket), remote_addr.to_string(), csender);
-
-                                loop {
-                                    match ir.handle().await {
-                                        Ok(_) => {},
-                                        Err(e) => match e.downcast_ref() {
-                                            Some(AppError::NotAnError) => break,
-                                            None => {
-                                                if ir.state.state == State::Initial {
-                                                    break;
-                                                }
-
-                                                if ir.state.state != State::Finished {
-                                                    let _ = esender.send(ChannelMessage {
-                                                        id: remote_addr.to_string(),
-                                                        direction: ChannelDirection::LibToFront,
-                                                        state: Some(State::Disconnected),
-                                                        ..Default::default()
-                                                    });
-                                                }
-                                                error!("{INNER_NAME}: error while handling client: {e} ({:?})", ir.state.state);
-                                                break;
-                                            }
-                                        },
-                                    }
-                                }
-                            });
+                            let ir = InboundRequest::new(Transport::new(socket), remote_addr.to_string(), self.sender.clone());
+                            tokio::spawn(ir.run());
                         },
                         Err(err) => {
                             error!("{INNER_NAME}: error accepting: {}", err);
