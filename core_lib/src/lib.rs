@@ -6,20 +6,15 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::anyhow;
 use channel::ChannelMessage;
-#[cfg(all(feature = "experimental", target_os = "linux"))]
-use hdl::BleAdvertiser;
-use hdl::MDnsDiscovery;
-use once_cell::sync::Lazy;
+use hdl::{BleAdvertiser, MDnsDiscovery};
+use rand::RngExt;
 use rand::distr::Alphanumeric;
-use rand::Rng;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-#[cfg(feature = "experimental")]
-use crate::hdl::BleListener;
-use crate::hdl::MDnsServer;
+use crate::hdl::{BleListener, MDnsServer};
 use crate::manager::TcpServer;
 
 pub mod channel;
@@ -30,7 +25,7 @@ mod utils;
 
 pub use hdl::{EndpointInfo, OutboundPayload, State, Visibility};
 pub use manager::SendInfo;
-pub use utils::DeviceType;
+pub use utils::{DeviceType, get_download_dir, hostname};
 
 pub mod sharing_nearby {
     include!(concat!(env!("OUT_DIR"), "/sharing.nearby.rs"));
@@ -48,7 +43,7 @@ pub mod location_nearby_connections {
     include!(concat!(env!("OUT_DIR"), "/location.nearby.connections.rs"));
 }
 
-static CUSTOM_DOWNLOAD: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
+static CUSTOM_DOWNLOAD: RwLock<Option<PathBuf>> = RwLock::new(None);
 
 #[derive(Debug)]
 pub struct RQS {
@@ -68,12 +63,6 @@ pub struct RQS {
     port_number: Option<u32>,
 
     pub message_sender: broadcast::Sender<ChannelMessage>,
-}
-
-impl Default for RQS {
-    fn default() -> Self {
-        Self::new(Visibility::Visible, None, None)
-    }
 }
 
 impl RQS {
@@ -112,11 +101,7 @@ impl RQS {
         self.tracker = Some(tracker.clone());
         self.ctoken = Some(ctoken.clone());
 
-        let endpoint_id: Vec<u8> = rand::rng()
-            .sample_iter(Alphanumeric)
-            .take(4)
-            .map(u8::from)
-            .collect();
+        let endpoint_id: Vec<u8> = rand::rng().sample_iter(Alphanumeric).take(4).collect();
         let tcp_listener =
             TcpListener::bind(format!("0.0.0.0:{}", self.port_number.unwrap_or(0))).await?;
         let binded_addr = tcp_listener.local_addr()?;
@@ -134,13 +119,17 @@ impl RQS {
         let ctk = ctoken.clone();
         tracker.spawn(async move { server.run(ctk).await });
 
-        #[cfg(feature = "experimental")]
-        {
-            // Don't threat BleListener error as fatal, it's a nice to have.
-            if let Ok(ble) = BleListener::new(self.ble_sender.clone()).await {
+        // Bluetooth is a nice to have: without it we still work over Wi-Fi LAN.
+        match BleListener::new(self.ble_sender.clone()).await {
+            Ok(ble) => {
                 let ctk = ctoken.clone();
-                tracker.spawn(async move { ble.run(ctk).await });
+                tracker.spawn(async move {
+                    if let Err(e) = ble.run(ctk).await {
+                        warn!("BleListener stopped: {e}");
+                    }
+                });
             }
+            Err(e) => warn!("BleListener unavailable: {e}"),
         }
 
         // Start MDnsServer in own "task"
@@ -163,6 +152,8 @@ impl RQS {
         &mut self,
         sender: broadcast::Sender<EndpointInfo>,
     ) -> Result<(), anyhow::Error> {
+        self.stop_discovery();
+
         let tracker = self
             .tracker
             .as_ref()
@@ -171,23 +162,20 @@ impl RQS {
         let ctk = CancellationToken::new();
         self.discovery_ctk = Some(ctk.clone());
 
-        #[cfg(all(feature = "experimental", target_os = "linux"))]
-        {
-            let ctk_blea = ctk.clone();
-            tracker.spawn(async move {
-                let blea = match BleAdvertiser::new().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        error!("Couldn't init BleAdvertiser: {}", e);
-                        return;
-                    }
-                };
-
-                if let Err(e) = blea.run(ctk_blea).await {
-                    error!("Couldn't start BleAdvertiser: {}", e);
+        let ctk_blea = ctk.clone();
+        tracker.spawn(async move {
+            let blea = match BleAdvertiser::new().await {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("Couldn't init BleAdvertiser: {}", e);
+                    return;
                 }
-            });
-        }
+            };
+
+            if let Err(e) = blea.run(ctk_blea).await {
+                error!("Couldn't start BleAdvertiser: {}", e);
+            }
+        });
 
         let discovery = MDnsDiscovery::new(sender)?;
         tracker.spawn(async move { discovery.run(ctk.clone()).await });

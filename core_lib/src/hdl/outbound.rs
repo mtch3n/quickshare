@@ -6,52 +6,41 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use bytes::Bytes;
-use hmac::{Hmac, Mac};
-use libaes::{Cipher, AES_256_KEY_LEN};
-use p256::ecdh::diffie_hellman;
-use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use p256::{EncodedPoint, PublicKey};
 use prost::Message;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, Sha512};
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use sha2::{Digest, Sha512};
 use tokio::sync::broadcast::{Receiver, Sender};
 use ts_rs::TS;
 
+use super::crypto::{self, Role};
 use super::info::{InternalFileInfo, TransferMetadata};
+use super::transport::Transport;
 use super::{InnerState, State};
 use crate::channel::{ChannelAction, ChannelDirection, ChannelMessage};
 use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium;
 use crate::location_nearby_connections::connection_response_frame::ResponseStatus;
 use crate::location_nearby_connections::payload_transfer_frame::{
-    payload_header, PacketType, PayloadChunk, PayloadHeader,
+    PacketType, PayloadChunk, PayloadHeader, payload_header,
 };
 use crate::location_nearby_connections::{KeepAliveFrame, OfflineFrame, PayloadTransferFrame};
 use crate::securegcm::ukey2_alert::AlertType;
 use crate::securegcm::ukey2_client_init::CipherCommitment;
 use crate::securegcm::{
-    ukey2_message, DeviceToDeviceMessage, GcmMetadata, Type, Ukey2Alert, Ukey2ClientFinished,
-    Ukey2ClientInit, Ukey2HandshakeCipher, Ukey2Message, Ukey2ServerInit,
+    DeviceToDeviceMessage, GcmMetadata, Type, Ukey2Alert, Ukey2ClientFinished, Ukey2ClientInit,
+    Ukey2HandshakeCipher, Ukey2Message, Ukey2ServerInit, ukey2_message,
 };
 use crate::securemessage::{
     EcP256PublicKey, EncScheme, GenericPublicKey, Header, HeaderAndBody, PublicKeyType,
     SecureMessage, SigScheme,
 };
 use crate::sharing_nearby::{
-    file_metadata, paired_key_result_frame, FileMetadata, IntroductionFrame,
+    FileMetadata, IntroductionFrame, file_metadata, paired_key_result_frame,
 };
-use crate::utils::{
-    encode_point, gen_ecdsa_keypair, gen_random, hkdf_extract_expand, stream_read_exact,
-    to_four_digit_string, DeviceType, RemoteDeviceInfo,
-};
+use crate::utils::{DeviceType, RemoteDeviceInfo, encode_endpoint_info, gen_random};
 use crate::{location_nearby_connections, sharing_nearby};
 
-type HmacSha256 = Hmac<Sha256>;
-
 const SANE_FRAME_LENGTH: i32 = 5 * 1024 * 1024;
+const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 const SANITY_DURATION: Duration = Duration::from_micros(10);
 
 #[derive(Debug, Deserialize, Serialize, TS)]
@@ -63,7 +52,7 @@ pub enum OutboundPayload {
 #[derive(Debug)]
 pub struct OutboundRequest {
     endpoint_id: [u8; 4],
-    socket: TcpStream,
+    transport: Transport,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
@@ -73,7 +62,7 @@ pub struct OutboundRequest {
 impl OutboundRequest {
     pub fn new(
         endpoint_id: [u8; 4],
-        socket: TcpStream,
+        transport: Transport,
         id: String,
         sender: Sender<ChannelMessage>,
         payload: OutboundPayload,
@@ -84,15 +73,14 @@ impl OutboundRequest {
 
         Self {
             endpoint_id,
-            socket,
+            transport,
             state: InnerState {
                 id,
                 server_seq: 0,
                 client_seq: 0,
                 state: State::Initial,
-                encryption_done: true,
+                encryption_done: false,
                 transfer_metadata: Some(TransferMetadata {
-                    id: String::from(""),
                     source: Some(rdi),
                     files: Some(files.to_owned()),
                     ..Default::default()
@@ -106,9 +94,6 @@ impl OutboundRequest {
     }
 
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
-        // Buffer for the 4-byte length
-        let mut length_buf = [0u8; 4];
-
         tokio::select! {
             i = self.receiver.recv() => {
                 match i {
@@ -144,28 +129,15 @@ impl OutboundRequest {
                     }
                 }
             },
-            h = stream_read_exact(&mut self.socket, &mut length_buf) => {
-                h?;
-
-                self._handle(length_buf).await?
+            frame = self.transport.read_frame() => {
+                self._handle(frame?).await?
             }
         }
 
         Ok(())
     }
 
-    pub async fn _handle(&mut self, length_buf: [u8; 4]) -> Result<(), anyhow::Error> {
-        let msg_length = u32::from_be_bytes(length_buf) as usize;
-        // Ensure the message length is not unreasonably big to avoid allocation attacks
-        if msg_length > SANE_FRAME_LENGTH as usize {
-            error!("Message length too big");
-            return Err(anyhow!("value"));
-        }
-
-        // Allocate buffer for the actual message and read it
-        let mut frame_data = vec![0u8; msg_length];
-        stream_read_exact(&mut self.socket, &mut frame_data).await?;
-
+    async fn _handle(&mut self, frame_data: Vec<u8>) -> Result<(), anyhow::Error> {
         let current_state = &self.state;
         // Now determine what will be the request type based on current state
         match current_state.state {
@@ -226,15 +198,14 @@ impl OutboundRequest {
                 ),
                 connection_request: Some(location_nearby_connections::ConnectionRequestFrame {
                     endpoint_id: Some(String::from_utf8_lossy(&self.endpoint_id).to_string()),
-                    endpoint_name: Some(sys_metrics::host::get_hostname()?.into()),
-                    endpoint_info: Some(
-                        RemoteDeviceInfo {
-                            name: sys_metrics::host::get_hostname()?,
-                            device_type: DeviceType::Laptop,
-                        }
-                        .serialize(),
-                    ),
+                    endpoint_name: Some(crate::utils::hostname().into()),
+                    endpoint_info: Some(encode_endpoint_info(
+                        DeviceType::Laptop,
+                        &crate::utils::hostname(),
+                    )),
                     mediums: vec![Medium::WifiLan.into()],
+                    keep_alive_interval_millis: Some(5_000),
+                    keep_alive_timeout_millis: Some(30_000),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -247,18 +218,12 @@ impl OutboundRequest {
     }
 
     pub async fn send_ukey2_client_init(&mut self) -> Result<(), anyhow::Error> {
-        let (secret_key, public_key) = gen_ecdsa_keypair();
-
-        let encoded_point = public_key.to_encoded_point(false);
-        let x = encoded_point.x().unwrap();
-        let y = encoded_point.y().unwrap();
+        let (secret_key, public_key) = crypto::gen_keypair();
+        let (x, y) = crypto::encode_public_key(&public_key);
 
         let pkey = GenericPublicKey {
             r#type: PublicKeyType::EcP256.into(),
-            ec_p256_public_key: Some(EcP256PublicKey {
-                x: encode_point(Bytes::from(x.to_vec()))?,
-                y: encode_point(Bytes::from(y.to_vec()))?,
-            }),
+            ec_p256_public_key: Some(EcP256PublicKey { x, y }),
             ..Default::default()
         };
 
@@ -295,7 +260,6 @@ impl OutboundRequest {
             |e| {
                 e.state = State::SentUkeyClientInit;
                 e.private_key = Some(secret_key);
-                e.public_key = Some(public_key);
                 e.client_init_msg_data = Some(frame.encode_to_vec());
                 e.ukey_client_finish_msg_data = Some(finish_frame.encode_to_vec());
             },
@@ -417,25 +381,18 @@ impl OutboundRequest {
         &mut self,
         smsg: &SecureMessage,
     ) -> Result<(), anyhow::Error> {
-        let mut hmac = HmacSha256::new_from_slice(self.state.recv_hmac_key.as_ref().unwrap())?;
-        hmac.update(&smsg.header_and_body);
-        if !hmac
-            .finalize()
-            .into_bytes()
-            .as_slice()
-            .eq(smsg.signature.as_slice())
-        {
-            return Err(anyhow!("hmac!=signature"));
-        }
+        crypto::verify(
+            self.state.recv_hmac_key.as_ref().unwrap(),
+            &smsg.header_and_body,
+            &smsg.signature,
+        )?;
 
         let header_and_body = HeaderAndBody::decode(&*smsg.header_and_body)?;
-
-        let msg_data = header_and_body.body;
-        let key = self.state.decrypt_key.as_ref().unwrap();
-
-        let mut cipher = Cipher::new_256(key[..AES_256_KEY_LEN].try_into()?);
-        cipher.set_auto_padding(true);
-        let decrypted = cipher.cbc_decrypt(header_and_body.header.iv(), &msg_data);
+        let decrypted = crypto::decrypt(
+            self.state.decrypt_key.as_ref().unwrap(),
+            header_and_body.header.iv(),
+            &header_and_body.body,
+        )?;
 
         let d2d_msg = DeviceToDeviceMessage::decode(&*decrypted)?;
 
@@ -679,7 +636,7 @@ impl OutboundRequest {
                         .file_name()
                         .ok_or_else(|| anyhow!("Failed to get file_name for {f}"))?;
                     let fmeta = FileMetadata {
-                        payload_id: Some(rand::rng().random::<i64>()),
+                        payload_id: Some(rand::random::<i64>()),
                         name: Some(fname.to_os_string().into_string().unwrap()),
                         size: Some(fmetadata.size() as i64),
                         mime_type: Some(ftype),
@@ -761,16 +718,13 @@ impl OutboundRequest {
                         Some(i) => i,
                         None => {
                             info!("All files have been transferred");
-                            self.update_state(
-                                |e| {
-                                    e.state = State::Finished;
-                                },
-                                true,
-                            )
-                            .await;
+                            // Let the receiver drain everything and hang up first:
+                            // closing right away can reset the connection and lose
+                            // the last chunks.
                             self.disconnection().await?;
-                            // Breaking instead of NotAnError to allow peacefull termination
-                            break;
+                            self.wait_for_peer_close(PEER_CLOSE_TIMEOUT).await;
+                            self.update_state(|e| e.state = State::Finished, true).await;
+                            return Err(anyhow!(crate::errors::AppError::NotAnError));
                         }
                     };
 
@@ -822,7 +776,7 @@ impl OutboundRequest {
                             "> File ready: {bytes_read} bytes && {} && left to send: {} with current offset: {}",
                             sending_buffer.len(),
                             curr_state.total_size - curr_state.bytes_transferred,
-							curr_state.bytes_transferred
+                            curr_state.bytes_transferred
                         );
 
                         let payload_header = PayloadHeader {
@@ -923,7 +877,7 @@ impl OutboundRequest {
                 )
                 .await;
                 self.disconnection().await?;
-                return Err(anyhow!(crate::errors::AppError::NotAnError));
+                Err(anyhow!(crate::errors::AppError::NotAnError))
             }
             sharing_nearby::connection_response_frame::Status::Unknown => {
                 error!("Unknown consent type: aborting");
@@ -935,11 +889,9 @@ impl OutboundRequest {
                 )
                 .await;
                 self.disconnection().await?;
-                return Err(anyhow!(crate::errors::AppError::NotAnError));
+                Err(anyhow!(crate::errors::AppError::NotAnError))
             }
         }
-
-        Ok(())
     }
 
     async fn disconnection(&mut self) -> Result<(), anyhow::Error> {
@@ -970,64 +922,27 @@ impl OutboundRequest {
         let peer_p256_key = raw_peer_key
             .ec_p256_public_key
             .ok_or_else(|| anyhow!("Missing required fields"))?;
+        let peer_key = crypto::decode_public_key(&peer_p256_key.x, &peer_p256_key.y)?;
 
-        let mut bytes = vec![0x04];
-        // Ensure no more than 32 bytes for the keys
-        if peer_p256_key.x.len() > 32 {
-            bytes.extend_from_slice(&peer_p256_key.x[peer_p256_key.x.len() - 32..]);
-        } else {
-            bytes.extend_from_slice(&peer_p256_key.x);
-        }
-        if peer_p256_key.y.len() > 32 {
-            bytes.extend_from_slice(&peer_p256_key.y[peer_p256_key.y.len() - 32..]);
-        } else {
-            bytes.extend_from_slice(&peer_p256_key.y);
-        }
-
-        let encoded_point = EncodedPoint::from_bytes(bytes)?;
-        let peer_key = PublicKey::from_encoded_point(&encoded_point).unwrap();
-        let priv_key = self.state.private_key.as_ref().unwrap();
-
-        let dhs = diffie_hellman(priv_key.to_nonzero_scalar(), peer_key.as_affine());
-        let derived_secret = Sha256::digest(dhs.raw_secret_bytes());
-
-        let mut ukey_info: Vec<u8> = vec![];
-        ukey_info.extend_from_slice(self.state.client_init_msg_data.as_ref().unwrap());
-        ukey_info.extend_from_slice(self.state.server_init_data.as_ref().unwrap());
-
-        let auth_label = "UKEY2 v1 auth".as_bytes();
-        let next_label = "UKEY2 v1 next".as_bytes();
-
-        let auth_string = hkdf_extract_expand(auth_label, &derived_secret, &ukey_info, 32)?;
-        let next_secret = hkdf_extract_expand(next_label, &derived_secret, &ukey_info, 32)?;
-
-        let salt_hex = "82AA55A0D397F88346CA1CEE8D3909B95F13FA7DEB1D4AB38376B8256DA85510";
-        let salt =
-            hex::decode(salt_hex).map_err(|e| anyhow!("Failed to decode salt_hex: {}", e))?;
-
-        let d2d_client = hkdf_extract_expand(&salt, &next_secret, "client".as_bytes(), 32)?;
-        let d2d_server = hkdf_extract_expand(&salt, &next_secret, "server".as_bytes(), 32)?;
-
-        let key_salt_hex = "BF9D2A53C63616D75DB0A7165B91C1EF73E537F2427405FA23610A4BE657642E";
-        let key_salt = hex::decode(key_salt_hex)
-            .map_err(|e| anyhow!("Failed to decode key_salt_hex: {}", e))?;
-
-        let client_key = hkdf_extract_expand(&key_salt, &d2d_client, "ENC:2".as_bytes(), 32)?;
-        let client_hmac_key = hkdf_extract_expand(&key_salt, &d2d_client, "SIG:1".as_bytes(), 32)?;
-        let server_key = hkdf_extract_expand(&key_salt, &d2d_server, "ENC:2".as_bytes(), 32)?;
-        let server_hmac_key = hkdf_extract_expand(&key_salt, &d2d_server, "SIG:1".as_bytes(), 32)?;
+        let keys = crypto::derive_session_keys(
+            self.state.private_key.as_ref().unwrap(),
+            &peer_key,
+            self.state.client_init_msg_data.as_ref().unwrap(),
+            self.state.server_init_data.as_ref().unwrap(),
+            Role::Client,
+        )?;
 
         self.update_state(
             |e| {
-                e.decrypt_key = Some(server_key);
-                e.recv_hmac_key = Some(server_hmac_key);
-                e.encrypt_key = Some(client_key);
-                e.send_hmac_key = Some(client_hmac_key);
-                e.pin_code = Some(to_four_digit_string(&auth_string));
+                e.decrypt_key = Some(keys.decrypt_key);
+                e.recv_hmac_key = Some(keys.recv_hmac_key);
+                e.encrypt_key = Some(keys.encrypt_key);
+                e.send_hmac_key = Some(keys.send_hmac_key);
+                e.pin_code = Some(keys.pin_code.clone());
                 e.encryption_done = true;
 
                 if let Some(ref mut tm) = e.transfer_metadata {
-                    tm.pin_code = Some(to_four_digit_string(&auth_string));
+                    tm.pin_code = Some(keys.pin_code);
                 }
             },
             true,
@@ -1046,7 +961,7 @@ impl OutboundRequest {
         };
 
         let data = Ukey2Message {
-            message_type: Some(atype.into()),
+            message_type: Some(ukey2_message::Type::Alert.into()),
             message_data: Some(alert.encode_to_vec()),
         };
 
@@ -1061,7 +976,7 @@ impl OutboundRequest {
         let body_size = frame_data.len();
 
         let payload_header = PayloadHeader {
-            id: Some(rand::rng().random_range(i64::MIN..i64::MAX)),
+            id: Some(rand::random_range(i64::MIN..i64::MAX)),
             r#type: Some(payload_header::PayloadType::Bytes.into()),
             total_size: Some(body_size as i64),
             is_sensitive: Some(false),
@@ -1128,13 +1043,12 @@ impl OutboundRequest {
             message: Some(frame.encode_to_vec()),
         };
 
-        let key = self.state.encrypt_key.as_ref().unwrap();
-        let msg_data = d2d_msg.encode_to_vec();
         let iv = gen_random(16);
-
-        let mut cipher = Cipher::new_256(&key[..AES_256_KEY_LEN].try_into().unwrap());
-        cipher.set_auto_padding(true);
-        let encrypted = cipher.cbc_encrypt(&iv, &msg_data);
+        let encrypted = crypto::encrypt(
+            self.state.encrypt_key.as_ref().unwrap(),
+            &iv,
+            &d2d_msg.encode_to_vec(),
+        )?;
 
         let hb = HeaderAndBody {
             body: encrypted,
@@ -1153,13 +1067,12 @@ impl OutboundRequest {
             },
         };
 
-        let mut hmac = HmacSha256::new_from_slice(self.state.send_hmac_key.as_ref().unwrap())?;
-        hmac.update(&hb.encode_to_vec());
-        let result = hmac.finalize();
+        let header_and_body = hb.encode_to_vec();
+        let signature = crypto::sign(self.state.send_hmac_key.as_ref().unwrap(), &header_and_body)?;
 
         let smsg = SecureMessage {
-            header_and_body: hb.encode_to_vec(),
-            signature: result.into_bytes().to_vec(),
+            header_and_body,
+            signature,
         };
 
         self.send_frame(smsg.encode_to_vec()).await?;
@@ -1184,25 +1097,14 @@ impl OutboundRequest {
         }
     }
 
+    async fn wait_for_peer_close(&mut self, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while let Ok(Ok(_)) = tokio::time::timeout_at(deadline, self.transport.read_frame()).await {
+        }
+    }
+
     async fn send_frame(&mut self, data: Vec<u8>) -> Result<(), anyhow::Error> {
-        let length = data.len();
-
-        // Prepare length prefix in big-endian format
-        let length_bytes = [
-            (length >> 24) as u8,
-            (length >> 16) as u8,
-            (length >> 8) as u8,
-            length as u8,
-        ];
-
-        let mut prefixed_length = Vec::with_capacity(length + 4);
-        prefixed_length.extend_from_slice(&length_bytes);
-        prefixed_length.extend_from_slice(&data);
-
-        self.socket.write_all(&prefixed_length).await?;
-        self.socket.flush().await?;
-
-        Ok(())
+        self.transport.write_frame(&data).await
     }
 
     async fn get_server_seq_inc(&mut self) -> i32 {

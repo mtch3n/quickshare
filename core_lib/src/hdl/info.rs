@@ -19,7 +19,6 @@ pub struct InternalFileInfo {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, TS)]
 #[ts(export)]
 pub struct TransferMetadata {
-    pub id: String,
     pub source: Option<RemoteDeviceInfo>,
     pub pin_code: Option<String>,
 
@@ -30,6 +29,8 @@ pub struct TransferMetadata {
     pub text_description: Option<String>,
     pub text_payload: Option<String>,
 
+    #[ts(type = "number")]
     pub total_bytes: u64,
+    #[ts(type = "number")]
     pub ack_bytes: u64,
 }

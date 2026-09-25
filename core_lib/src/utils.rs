@@ -1,27 +1,17 @@
-use std::net::Ipv4Addr;
+use std::fs::{File, OpenOptions};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use bytes::Bytes;
-use get_if_addrs::get_if_addrs;
-use hkdf::Hkdf;
-use num_bigint::{BigUint, ToBigInt};
-use p256::elliptic_curve::rand_core::OsRng;
-use p256::{PublicKey, SecretKey};
-use rand::{Rng, RngCore};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
 use ts_rs::TS;
 
 use crate::CUSTOM_DOWNLOAD;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize, TS)]
 #[ts(export)]
-#[allow(dead_code)]
 pub enum DeviceType {
     Unknown = 0,
     Phone = 1,
@@ -29,11 +19,9 @@ pub enum DeviceType {
     Laptop = 3,
 }
 
-#[allow(dead_code)]
 impl DeviceType {
     pub fn from_raw_value(value: u8) -> Self {
         match value {
-            0 => DeviceType::Unknown,
             1 => DeviceType::Phone,
             2 => DeviceType::Tablet,
             3 => DeviceType::Laptop,
@@ -49,24 +37,40 @@ pub struct RemoteDeviceInfo {
     pub device_type: DeviceType,
 }
 
-impl RemoteDeviceInfo {
-    pub fn serialize(&self) -> Vec<u8> {
-        // 1 byte: Version(3 bits)|Visibility(1 bit)|Device Type(3 bits)|Reserved(1 bit)
-        let mut endpoint_info: Vec<u8> = vec![((self.device_type.clone() as u8) << 1) & 0b111];
+/// Endpoint info as advertised over mDNS and sent in the ConnectionRequest:
+/// 1 byte Version(3 bits)|Visibility(1 bit)|Device type(3 bits)|Reserved(1 bit),
+/// 16 random bytes, then the UTF-8 name prefixed with its 1-byte length.
+pub fn encode_endpoint_info(device_type: DeviceType, name: &str) -> Vec<u8> {
+    let name = &name[..name.floor_char_boundary(u8::MAX as usize)];
 
-        // 16 bytes: unknown random bytes
-        endpoint_info.extend((0..16).map(|_| rand::rng().random_range(0..=255)));
+    let mut info = vec![(device_type as u8 & 0b111) << 1];
+    info.extend(rand::random::<[u8; 16]>());
+    info.push(name.len() as u8);
+    info.extend_from_slice(name.as_bytes());
+    info
+}
 
-        // Device name in UTF-8 prefixed with 1-byte length
-        let mut name_chars = self.name.as_bytes().to_vec();
-        if name_chars.len() > 255 {
-            name_chars.truncate(255);
-        }
-        endpoint_info.push(name_chars.len() as u8);
-        endpoint_info.extend(name_chars);
-
-        endpoint_info
+/// Parses endpoint info. The name is absent when the peer hides it (visibility
+/// bit set) or only sends the 17-byte header.
+pub fn parse_endpoint_info(info: &[u8]) -> Result<(DeviceType, Option<String>), anyhow::Error> {
+    if info.len() < 17 {
+        return Err(anyhow!("endpoint info too short ({} bytes)", info.len()));
     }
+
+    let device_type = DeviceType::from_raw_value((info[0] >> 1) & 0b111);
+    if (info[0] >> 4) & 1 == 1 || info.len() == 17 {
+        return Ok((device_type, None));
+    }
+
+    let name_len = info[17] as usize;
+    let name = info
+        .get(18..18 + name_len)
+        .ok_or_else(|| anyhow!("endpoint name length out of range"))?;
+
+    Ok((
+        device_type,
+        Some(String::from_utf8_lossy(name).into_owned()),
+    ))
 }
 
 pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
@@ -86,81 +90,7 @@ pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
     URL_SAFE_NO_PAD.encode(&name_b)
 }
 
-pub fn gen_mdns_endpoint_info(device_type: u8, device_name: &str) -> String {
-    let mut record = Vec::new();
-
-    // 1 byte: Version(3 bits)|Visibility(1 bit)|Device Type(3 bits)|Reserved(1 bits)
-    // Device types: unknown=0, phone=1, tablet=2, laptop=3
-    record.push(device_type << 1);
-
-    let unknown_bytes = rand::rng().random::<[u8; 16]>();
-    record.extend_from_slice(&unknown_bytes);
-
-    let device_name = device_name.as_bytes();
-    let length = device_name.len() as u8;
-    record.push(length);
-    record.extend_from_slice(device_name);
-
-    URL_SAFE_NO_PAD.encode(&record)
-}
-
-pub fn parse_mdns_endpoint_info(encoded_str: &str) -> Result<(DeviceType, String), anyhow::Error> {
-    let decoded_bytes = URL_SAFE_NO_PAD.decode(encoded_str)?;
-    if decoded_bytes.len() < 19 {
-        return Err(anyhow!("Invalid data length"));
-    }
-
-    let device_type = (decoded_bytes[0] >> 1) & 0x7;
-    let name_length = decoded_bytes[17] as usize;
-    if 18 + name_length > decoded_bytes.len() {
-        return Err(anyhow!("Invalid name length"));
-    }
-
-    let device_name_bytes = &decoded_bytes[18..18 + name_length];
-    let device_name = String::from_utf8(device_name_bytes.to_vec())?;
-
-    Ok((DeviceType::from_raw_value(device_type), device_name))
-}
-
-pub async fn stream_read_exact(
-    socket: &mut TcpStream,
-    buf: &mut [u8],
-) -> Result<(), anyhow::Error> {
-    match socket.read_exact(buf).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-pub fn gen_ecdsa_keypair() -> (SecretKey, PublicKey) {
-    let secret_key = SecretKey::random(&mut OsRng);
-    let public_key = secret_key.public_key();
-
-    (secret_key, public_key)
-}
-
-pub fn encode_point(unsigned: Bytes) -> Result<Vec<u8>, anyhow::Error> {
-    let big_int = BigUint::from_bytes_be(&unsigned)
-        .to_bigint()
-        .ok_or_else(|| anyhow!("Failed to convert to bigint"))?;
-
-    Ok(big_int.to_signed_bytes_be())
-}
-
-pub fn hkdf_extract_expand(
-    salt: &[u8],
-    input: &[u8],
-    info: &[u8],
-    output_len: usize,
-) -> Result<Vec<u8>, anyhow::Error> {
-    let hkdf = Hkdf::<Sha256>::new(Some(salt), input);
-    let mut okm = vec![0u8; output_len];
-    hkdf.expand(info, &mut okm)
-        .map_err(|e| anyhow!("HKDF expand failed: {}", e))?;
-    Ok(okm)
-}
-
-pub fn to_four_digit_string(bytes: &Vec<u8>) -> String {
+pub fn to_four_digit_string(bytes: &[u8]) -> String {
     let k_hash_modulo = 9973;
     let k_hash_base_multiplier = 31;
 
@@ -177,7 +107,7 @@ pub fn to_four_digit_string(bytes: &Vec<u8>) -> String {
 
 pub fn gen_random(size: usize) -> Vec<u8> {
     let mut data = vec![0; size];
-    rand::rng().fill_bytes(&mut data);
+    rand::fill(&mut data[..]);
 
     data
 }
@@ -207,15 +137,52 @@ pub fn get_download_dir() -> PathBuf {
 }
 
 pub fn is_not_self_ip(ip_address: &Ipv4Addr) -> bool {
-    if let Ok(if_addrs) = get_if_addrs() {
-        for if_addr in if_addrs {
-            if if_addr.ip() == *ip_address {
-                return false;
+    let ip = IpAddr::V4(*ip_address);
+    if_addrs::get_if_addrs()
+        .map(|addrs| addrs.iter().all(|a| a.ip() != ip))
+        .unwrap_or(true)
+}
+
+/// A file name sent by a peer, reduced to its last path component so it can't
+/// escape the download directory.
+pub fn sanitize_file_name(name: &str) -> Option<String> {
+    let name = Path::new(name).file_name()?.to_str()?;
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// Creates `path` without overwriting anything, falling back to `name (1).ext`,
+/// `name (2).ext`, ... when it already exists.
+pub fn create_unique_file(path: &Path) -> std::io::Result<(PathBuf, File)> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+
+    let mut candidate = path.to_path_buf();
+    for n in 1.. {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                candidate = path.with_file_name(format!("{stem} ({n}){ext}"));
             }
+            Err(e) => return Err(e),
         }
     }
 
-    true
+    unreachable!()
+}
+
+pub fn hostname() -> String {
+    gethostname::gethostname().to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
@@ -223,17 +190,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_gen_and_parse_mdns_info() {
-        let device_name = "a_device_name";
-        let device_type = DeviceType::Laptop;
+    fn endpoint_info_roundtrip() {
+        let info = encode_endpoint_info(DeviceType::Laptop, "a_device_name");
+        let (device_type, name) = parse_endpoint_info(&info).unwrap();
 
-        dbg!(&device_type);
-        dbg!(device_type.clone() as u8);
+        assert_eq!(device_type, DeviceType::Laptop);
+        assert_eq!(name.as_deref(), Some("a_device_name"));
+    }
 
-        let info = gen_mdns_endpoint_info(device_type.clone() as u8, device_name);
-        let parse_info = parse_mdns_endpoint_info(&info).unwrap();
+    #[test]
+    fn endpoint_info_without_name() {
+        let mut info = encode_endpoint_info(DeviceType::Phone, "");
+        info.truncate(17);
+        assert_eq!(
+            parse_endpoint_info(&info).unwrap(),
+            (DeviceType::Phone, None)
+        );
 
-        assert_eq!(parse_info.1, device_name);
-        assert_eq!(parse_info.0, device_type);
+        // Visibility bit set: the name must be ignored.
+        let mut info = encode_endpoint_info(DeviceType::Phone, "hidden");
+        info[0] |= 1 << 4;
+        assert_eq!(
+            parse_endpoint_info(&info).unwrap(),
+            (DeviceType::Phone, None)
+        );
+
+        assert!(parse_endpoint_info(&[0; 16]).is_err());
+    }
+
+    #[test]
+    fn endpoint_name_is_truncated_on_char_boundary() {
+        let name = "é".repeat(200);
+        let info = encode_endpoint_info(DeviceType::Laptop, &name);
+        let (_, parsed) = parse_endpoint_info(&info).unwrap();
+
+        assert_eq!(parsed.unwrap().len(), 254);
+    }
+
+    #[test]
+    fn peer_file_names_stay_inside_the_download_dir() {
+        assert_eq!(
+            sanitize_file_name("photo.jpg").as_deref(),
+            Some("photo.jpg")
+        );
+        assert_eq!(
+            sanitize_file_name("../../.bashrc").as_deref(),
+            Some(".bashrc")
+        );
+        assert_eq!(sanitize_file_name("/etc/passwd").as_deref(), Some("passwd"));
+        assert_eq!(sanitize_file_name(".."), None);
+        assert_eq!(sanitize_file_name(""), None);
+    }
+
+    #[test]
+    fn unique_file_names() {
+        let dir = std::env::temp_dir().join(format!("rqs-test-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (first, _) = create_unique_file(&dir.join("a.txt")).unwrap();
+        let (second, _) = create_unique_file(&dir.join("a.txt")).unwrap();
+        assert_eq!(first, dir.join("a.txt"));
+        assert_eq!(second, dir.join("a (1).txt"));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

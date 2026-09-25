@@ -1,33 +1,26 @@
-use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use bytes::Bytes;
-use hmac::{Hmac, Mac};
-use libaes::{Cipher, AES_256_KEY_LEN};
-use p256::ecdh::diffie_hellman;
-use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use p256::{EncodedPoint, PublicKey};
 use prost::Message;
-use rand::Rng;
-use sha2::{Digest, Sha256, Sha512};
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use sha2::{Digest, Sha512};
 use tokio::sync::broadcast::{Receiver, Sender};
 
+use super::crypto::{self, Role};
+use super::transport::Transport;
 use super::{InnerState, State};
 use crate::channel::{ChannelAction, ChannelDirection, ChannelMessage};
 use crate::hdl::info::{InternalFileInfo, TransferMetadata};
 use crate::hdl::{TextPayloadInfo, TextPayloadType};
+use crate::location_nearby_connections::payload_transfer_frame::control_message::EventType as ControlEvent;
 use crate::location_nearby_connections::payload_transfer_frame::{
-    payload_header, PacketType, PayloadChunk, PayloadHeader,
+    PacketType, PayloadChunk, PayloadHeader, payload_header,
 };
 use crate::location_nearby_connections::{KeepAliveFrame, OfflineFrame, PayloadTransferFrame};
 use crate::securegcm::ukey2_alert::AlertType;
 use crate::securegcm::{
-    ukey2_message, DeviceToDeviceMessage, GcmMetadata, Type, Ukey2Alert, Ukey2ClientFinished,
-    Ukey2ClientInit, Ukey2HandshakeCipher, Ukey2Message, Ukey2ServerInit,
+    DeviceToDeviceMessage, GcmMetadata, Type, Ukey2Alert, Ukey2ClientFinished, Ukey2ClientInit,
+    Ukey2HandshakeCipher, Ukey2Message, Ukey2ServerInit, ukey2_message,
 };
 use crate::securemessage::{
     EcP256PublicKey, EncScheme, GenericPublicKey, Header, HeaderAndBody, PublicKeyType,
@@ -35,36 +28,34 @@ use crate::securemessage::{
 };
 use crate::sharing_nearby::{paired_key_result_frame, text_metadata};
 use crate::utils::{
-    encode_point, gen_ecdsa_keypair, gen_random, get_download_dir, hkdf_extract_expand,
-    stream_read_exact, to_four_digit_string, DeviceType, RemoteDeviceInfo,
+    RemoteDeviceInfo, create_unique_file, gen_random, get_download_dir, parse_endpoint_info,
+    sanitize_file_name,
 };
 use crate::{location_nearby_connections, sharing_nearby};
-
-type HmacSha256 = Hmac<Sha256>;
 
 const SANE_FRAME_LENGTH: i32 = 5 * 1024 * 1024;
 const SANITY_DURATION: Duration = Duration::from_micros(10);
 
 #[derive(Debug)]
 pub struct InboundRequest {
-    socket: TcpStream,
+    transport: Transport,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
 }
 
 impl InboundRequest {
-    pub fn new(socket: TcpStream, id: String, sender: Sender<ChannelMessage>) -> Self {
+    pub fn new(transport: Transport, id: String, sender: Sender<ChannelMessage>) -> Self {
         let receiver = sender.subscribe();
 
         Self {
-            socket,
+            transport,
             state: InnerState {
                 id,
                 server_seq: 0,
                 client_seq: 0,
                 state: State::Initial,
-                encryption_done: true,
+                encryption_done: false,
                 ..Default::default()
             },
             sender,
@@ -73,9 +64,6 @@ impl InboundRequest {
     }
 
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
-        // Buffer for the 4-byte length
-        let mut length_buf = [0u8; 4];
-
         tokio::select! {
             i = self.receiver.recv() => {
                 match i {
@@ -107,14 +95,7 @@ impl InboundRequest {
                                 return Err(anyhow!(crate::errors::AppError::NotAnError));
                             },
                             Some(ChannelAction::CancelTransfer) => {
-                                self.update_state(
-                                    |e| {
-                                        e.state = State::Cancelled;
-                                    },
-                                    true,
-                                ).await;
-                                self.disconnection().await?;
-                                return Err(anyhow!(crate::errors::AppError::NotAnError));
+                                return self.cancel(true).await;
                             },
                             None => {
                                 trace!("inbound: nothing to do")
@@ -126,28 +107,15 @@ impl InboundRequest {
                     }
                 }
             },
-            h = stream_read_exact(&mut self.socket, &mut length_buf) => {
-                h?;
-
-                self._handle(length_buf).await?
+            frame = self.transport.read_frame() => {
+                self._handle(frame?).await?
             }
         }
 
         Ok(())
     }
 
-    pub async fn _handle(&mut self, length_buf: [u8; 4]) -> Result<(), anyhow::Error> {
-        let msg_length = u32::from_be_bytes(length_buf) as usize;
-        // Ensure the message length is not unreasonably big to avoid allocation attacks
-        if msg_length > SANE_FRAME_LENGTH as usize {
-            error!("Message length too big");
-            return Err(anyhow!("value"));
-        }
-
-        // Allocate buffer for the actual message and read it
-        let mut frame_data = vec![0u8; msg_length];
-        stream_read_exact(&mut self.socket, &mut frame_data).await?;
-
+    async fn _handle(&mut self, frame_data: Vec<u8>) -> Result<(), anyhow::Error> {
         let current_state = &self.state;
         // Now determine what will be the request type based on current state
         match current_state.state {
@@ -155,7 +123,7 @@ impl InboundRequest {
                 debug!("Handling State::Initial frame");
                 let frame = location_nearby_connections::OfflineFrame::decode(&*frame_data)?;
                 let rdi = self.process_connection_request(&frame)?;
-                info!("RemoteDeviceInfo: {:?}", &rdi);
+                info!("RemoteDeviceInfo: {:?}", rdi);
 
                 // Advance current state
                 self.update_state(
@@ -244,30 +212,17 @@ impl InboundRequest {
             .as_ref()
             .ok_or_else(|| anyhow!("Missing endpoint info"))?;
 
-        // Check if endpoint info length is greater than 17
-        if endpoint_info.len() <= 17 {
-            return Err(anyhow!("Endpoint info too short"));
-        }
+        let (device_type, name) = parse_endpoint_info(endpoint_info)?;
+        let name = name
+            .or_else(|| {
+                connection_request
+                    .endpoint_name
+                    .as_ref()
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
 
-        let device_name_length = endpoint_info[17] as usize;
-        // Validate length including device name
-        if endpoint_info.len() < device_name_length + 18 {
-            return Err(anyhow!(
-                "Endpoint info too short to contain the device name"
-            ));
-        }
-
-        // Extract and validate device name based on length
-        let device_name = std::str::from_utf8(&endpoint_info[18..(18 + device_name_length)])
-            .map_err(|_| anyhow!("Device name is not valid UTF-8"))?;
-
-        // Parsing the device type
-        let raw_device_type = (endpoint_info[0] & 7) >> 1_usize;
-
-        Ok(RemoteDeviceInfo {
-            name: device_name.to_string(),
-            device_type: DeviceType::from_raw_value(raw_device_type),
-        })
+        Ok(RemoteDeviceInfo { name, device_type })
     }
 
     async fn process_ukey2_client_init(&mut self, msg: &Ukey2Message) -> Result<(), anyhow::Error> {
@@ -327,24 +282,18 @@ impl InboundRequest {
             ));
         }
 
-        let (secret_key, public_key) = gen_ecdsa_keypair();
-
-        let encoded_point = public_key.to_encoded_point(false);
-        let x = encoded_point.x().unwrap();
-        let y = encoded_point.y().unwrap();
+        let (secret_key, public_key) = crypto::gen_keypair();
+        let (x, y) = crypto::encode_public_key(&public_key);
 
         let pkey = GenericPublicKey {
             r#type: PublicKeyType::EcP256.into(),
-            ec_p256_public_key: Some(EcP256PublicKey {
-                x: encode_point(Bytes::from(x.to_vec()))?,
-                y: encode_point(Bytes::from(y.to_vec()))?,
-            }),
+            ec_p256_public_key: Some(EcP256PublicKey { x, y }),
             ..Default::default()
         };
 
         let server_init = Ukey2ServerInit {
             version: Some(1),
-            random: Some(rand::rng().random::<[u8; 32]>().to_vec()),
+            random: Some(rand::random::<[u8; 32]>().to_vec()),
             handshake_cipher: Some(Ukey2HandshakeCipher::P256Sha512.into()),
             public_key: Some(pkey.encode_to_vec()),
         };
@@ -358,7 +307,6 @@ impl InboundRequest {
         self.update_state(
             |e| {
                 e.private_key = Some(secret_key);
-                e.public_key = Some(public_key);
                 e.server_init_data = Some(server_init_data.clone());
             },
             false,
@@ -468,25 +416,18 @@ impl InboundRequest {
         &mut self,
         smsg: &SecureMessage,
     ) -> Result<(), anyhow::Error> {
-        let mut hmac = HmacSha256::new_from_slice(self.state.recv_hmac_key.as_ref().unwrap())?;
-        hmac.update(&smsg.header_and_body);
-        if !hmac
-            .finalize()
-            .into_bytes()
-            .as_slice()
-            .eq(smsg.signature.as_slice())
-        {
-            return Err(anyhow!("hmac!=signature"));
-        }
+        crypto::verify(
+            self.state.recv_hmac_key.as_ref().unwrap(),
+            &smsg.header_and_body,
+            &smsg.signature,
+        )?;
 
         let header_and_body = HeaderAndBody::decode(&*smsg.header_and_body)?;
-
-        let msg_data = header_and_body.body;
-        let key = self.state.decrypt_key.as_ref().unwrap();
-
-        let mut cipher = Cipher::new_256(key[..AES_256_KEY_LEN].try_into()?);
-        cipher.set_auto_padding(true);
-        let decrypted = cipher.cbc_decrypt(header_and_body.header.iv(), &msg_data);
+        let decrypted = crypto::decrypt(
+            self.state.decrypt_key.as_ref().unwrap(),
+            header_and_body.header.iv(),
+            &header_and_body.body,
+        )?;
 
         let d2d_msg = DeviceToDeviceMessage::decode(&*decrypted)?;
 
@@ -516,6 +457,16 @@ impl InboundRequest {
                     .payload_header
                     .as_ref()
                     .ok_or_else(|| anyhow!("Missing required fields"))?;
+
+                if payload_transfer.packet_type() == PacketType::Control {
+                    let event = payload_transfer.control_message.as_ref().map(|c| c.event());
+                    if event == Some(ControlEvent::PayloadCanceled) {
+                        info!("Sender cancelled payload {}", header.id());
+                        return self.cancel(false).await;
+                    }
+                    return Ok(());
+                }
+
                 let chunk = payload_transfer
                     .payload_chunk
                     .as_ref()
@@ -563,9 +514,7 @@ impl InboundRequest {
                                     == payload_id
                             {
                                 info!("Transfer finished");
-                                let end_index =
-                                    buffer.iter().position(|&b| b == 16).unwrap_or(buffer.len());
-                                let payload = std::str::from_utf8(&buffer[..end_index])?.to_owned();
+                                let payload = String::from_utf8_lossy(buffer).into_owned();
 
                                 match self.state.text_payload.clone().unwrap() {
                                     TextPayloadInfo::Url(_) => {
@@ -647,7 +596,9 @@ impl InboundRequest {
                         let chunk_size = chunk.body().len();
                         if current_offset + chunk_size as i64 > file_internal.total_size {
                             return Err(anyhow!(
-                                "Transferred file size exceeds previously specified value: {} vs {}", current_offset + chunk_size as i64, file_internal.total_size
+                                "Transferred file size exceeds previously specified value: {} vs {}",
+                                current_offset + chunk_size as i64,
+                                file_internal.total_size
                             ));
                         }
 
@@ -717,16 +668,8 @@ impl InboundRequest {
             .ok_or_else(|| anyhow!("Missing required fields"))?;
 
         if v1_frame.r#type() == sharing_nearby::v1_frame::FrameType::Cancel {
-            info!("Transfer canceled");
-            self.update_state(
-                |e| {
-                    e.state = State::Cancelled;
-                },
-                true,
-            )
-            .await;
-            self.disconnection().await?;
-            return Err(anyhow!(crate::errors::AppError::NotAnError));
+            info!("Transfer canceled by the sender");
+            return self.cancel(false).await;
         }
 
         match self.state.state {
@@ -826,27 +769,9 @@ impl InboundRequest {
             let mut total_bytes: u64 = 0;
 
             for file in &introduction.file_metadata {
-                info!("File name: {}", file.name());
-
-                let mut dest = get_download_dir();
-                dest.push(file.name());
-
-                info!("Destination: {:?}", dest);
-                if dest.exists() {
-                    let mut counter = 1;
-                    dest.pop();
-
-                    loop {
-                        dest.push(format!("{}_{}", counter, file.name()));
-                        if !dest.exists() {
-                            break;
-                        }
-                        dest.pop();
-                        counter += 1;
-                    }
-
-                    info!("New destination: {:?}", dest);
-                }
+                let name = sanitize_file_name(file.name())
+                    .unwrap_or_else(|| format!("file_{}", file.payload_id()));
+                let dest = get_download_dir().join(&name);
 
                 let info = InternalFileInfo {
                     payload_id: file.payload_id(),
@@ -857,11 +782,10 @@ impl InboundRequest {
                 };
                 total_bytes += info.total_size as u64;
                 self.state.transferred_files.insert(file.payload_id(), info);
-                files_name.push(file.name().to_owned());
+                files_name.push(name);
             }
 
             let metadata = TransferMetadata {
-                id: self.state.id.clone(),
                 destination: Some(
                     get_download_dir()
                         .into_os_string()
@@ -891,7 +815,6 @@ impl InboundRequest {
             match meta.r#type() {
                 text_metadata::Type::Url => {
                     let metadata = TransferMetadata {
-                        id: self.state.id.clone(),
                         destination: None,
                         source: self.state.remote_device_info.clone(),
                         files: None,
@@ -914,7 +837,6 @@ impl InboundRequest {
                 | text_metadata::Type::Address
                 | text_metadata::Type::Text => {
                     let metadata = TransferMetadata {
-                        id: self.state.id.clone(),
                         destination: None,
                         source: self.state.remote_device_info.clone(),
                         files: None,
@@ -946,7 +868,6 @@ impl InboundRequest {
             let meta = introduction.wifi_credentials_metadata.first().unwrap();
 
             let metadata = TransferMetadata {
-                id: self.state.id.clone(),
                 destination: None,
                 source: self.state.remote_device_info.clone(),
                 files: None,
@@ -998,14 +919,41 @@ impl InboundRequest {
         }
     }
 
+    /// Stops the transfer and deletes partially received files. `notify_peer`
+    /// sends a Cancel frame first, for cancellations coming from our side.
+    async fn cancel(&mut self, notify_peer: bool) -> Result<(), anyhow::Error> {
+        if notify_peer && self.state.encryption_done {
+            let frame = sharing_nearby::Frame {
+                version: Some(sharing_nearby::frame::Version::V1.into()),
+                v1: Some(sharing_nearby::V1Frame {
+                    r#type: Some(sharing_nearby::v1_frame::FrameType::Cancel.into()),
+                    ..Default::default()
+                }),
+            };
+            let _ = self.send_encrypted_frame(&frame).await;
+        }
+
+        for (_, info) in self.state.transferred_files.drain() {
+            if info.file.is_some() {
+                let _ = std::fs::remove_file(&info.file_url);
+            }
+        }
+
+        self.update_state(|e| e.state = State::Cancelled, true)
+            .await;
+        self.disconnection().await?;
+        Err(anyhow!(crate::errors::AppError::NotAnError))
+    }
+
     async fn accept_transfer(&mut self) -> Result<(), anyhow::Error> {
         let ids: Vec<i64> = self.state.transferred_files.keys().cloned().collect();
 
         for id in ids {
             let mfi = self.state.transferred_files.get_mut(&id).unwrap();
 
-            let file = File::create(&mfi.file_url)?;
-            info!("Created file: {:?}", &file);
+            let (path, file) = create_unique_file(&mfi.file_url)?;
+            info!("Receiving into {}", path.display());
+            mfi.file_url = path;
             mfi.file = Some(file);
         }
 
@@ -1066,60 +1014,23 @@ impl InboundRequest {
         let peer_p256_key = raw_peer_key
             .ec_p256_public_key
             .ok_or_else(|| anyhow!("Missing required fields"))?;
+        let peer_key = crypto::decode_public_key(&peer_p256_key.x, &peer_p256_key.y)?;
 
-        let mut bytes = vec![0x04];
-        // Ensure no more than 32 bytes for the keys
-        if peer_p256_key.x.len() > 32 {
-            bytes.extend_from_slice(&peer_p256_key.x[peer_p256_key.x.len() - 32..]);
-        } else {
-            bytes.extend_from_slice(&peer_p256_key.x);
-        }
-        if peer_p256_key.y.len() > 32 {
-            bytes.extend_from_slice(&peer_p256_key.y[peer_p256_key.y.len() - 32..]);
-        } else {
-            bytes.extend_from_slice(&peer_p256_key.y);
-        }
-
-        let encoded_point = EncodedPoint::from_bytes(bytes)?;
-        let peer_key = PublicKey::from_encoded_point(&encoded_point).unwrap();
-        let priv_key = self.state.private_key.as_ref().unwrap();
-
-        let dhs = diffie_hellman(priv_key.to_nonzero_scalar(), peer_key.as_affine());
-        let derived_secret = Sha256::digest(dhs.raw_secret_bytes());
-
-        let mut ukey_info: Vec<u8> = vec![];
-        ukey_info.extend_from_slice(self.state.client_init_msg_data.as_ref().unwrap());
-        ukey_info.extend_from_slice(self.state.server_init_data.as_ref().unwrap());
-
-        let auth_label = "UKEY2 v1 auth".as_bytes();
-        let next_label = "UKEY2 v1 next".as_bytes();
-
-        let auth_string = hkdf_extract_expand(auth_label, &derived_secret, &ukey_info, 32)?;
-        let next_secret = hkdf_extract_expand(next_label, &derived_secret, &ukey_info, 32)?;
-
-        let salt_hex = "82AA55A0D397F88346CA1CEE8D3909B95F13FA7DEB1D4AB38376B8256DA85510";
-        let salt =
-            hex::decode(salt_hex).map_err(|e| anyhow!("Failed to decode salt_hex: {}", e))?;
-
-        let d2d_client = hkdf_extract_expand(&salt, &next_secret, "client".as_bytes(), 32)?;
-        let d2d_server = hkdf_extract_expand(&salt, &next_secret, "server".as_bytes(), 32)?;
-
-        let key_salt_hex = "BF9D2A53C63616D75DB0A7165B91C1EF73E537F2427405FA23610A4BE657642E";
-        let key_salt = hex::decode(key_salt_hex)
-            .map_err(|e| anyhow!("Failed to decode key_salt_hex: {}", e))?;
-
-        let client_key = hkdf_extract_expand(&key_salt, &d2d_client, "ENC:2".as_bytes(), 32)?;
-        let client_hmac_key = hkdf_extract_expand(&key_salt, &d2d_client, "SIG:1".as_bytes(), 32)?;
-        let server_key = hkdf_extract_expand(&key_salt, &d2d_server, "ENC:2".as_bytes(), 32)?;
-        let server_hmac_key = hkdf_extract_expand(&key_salt, &d2d_server, "SIG:1".as_bytes(), 32)?;
+        let keys = crypto::derive_session_keys(
+            self.state.private_key.as_ref().unwrap(),
+            &peer_key,
+            self.state.client_init_msg_data.as_ref().unwrap(),
+            self.state.server_init_data.as_ref().unwrap(),
+            Role::Server,
+        )?;
 
         self.update_state(
             |e| {
-                e.decrypt_key = Some(client_key);
-                e.recv_hmac_key = Some(client_hmac_key);
-                e.encrypt_key = Some(server_key);
-                e.send_hmac_key = Some(server_hmac_key);
-                e.pin_code = Some(to_four_digit_string(&auth_string));
+                e.decrypt_key = Some(keys.decrypt_key);
+                e.recv_hmac_key = Some(keys.recv_hmac_key);
+                e.encrypt_key = Some(keys.encrypt_key);
+                e.send_hmac_key = Some(keys.send_hmac_key);
+                e.pin_code = Some(keys.pin_code);
                 e.encryption_done = true;
             },
             false,
@@ -1138,7 +1049,7 @@ impl InboundRequest {
         };
 
         let data = Ukey2Message {
-            message_type: Some(atype.into()),
+            message_type: Some(ukey2_message::Type::Alert.into()),
             message_data: Some(alert.encode_to_vec()),
         };
 
@@ -1153,7 +1064,7 @@ impl InboundRequest {
         let body_size = frame_data.len();
 
         let payload_header = PayloadHeader {
-            id: Some(rand::rng().random_range(i64::MIN..i64::MAX)),
+            id: Some(rand::random_range(i64::MIN..i64::MAX)),
             r#type: Some(payload_header::PayloadType::Bytes.into()),
             total_size: Some(body_size as i64),
             is_sensitive: Some(false),
@@ -1220,13 +1131,12 @@ impl InboundRequest {
             message: Some(frame.encode_to_vec()),
         };
 
-        let key = self.state.encrypt_key.as_ref().unwrap();
-        let msg_data = d2d_msg.encode_to_vec();
         let iv = gen_random(16);
-
-        let mut cipher = Cipher::new_256(&key[..AES_256_KEY_LEN].try_into().unwrap());
-        cipher.set_auto_padding(true);
-        let encrypted = cipher.cbc_encrypt(&iv, &msg_data);
+        let encrypted = crypto::encrypt(
+            self.state.encrypt_key.as_ref().unwrap(),
+            &iv,
+            &d2d_msg.encode_to_vec(),
+        )?;
 
         let hb = HeaderAndBody {
             body: encrypted,
@@ -1245,13 +1155,12 @@ impl InboundRequest {
             },
         };
 
-        let mut hmac = HmacSha256::new_from_slice(self.state.send_hmac_key.as_ref().unwrap())?;
-        hmac.update(&hb.encode_to_vec());
-        let result = hmac.finalize();
+        let header_and_body = hb.encode_to_vec();
+        let signature = crypto::sign(self.state.send_hmac_key.as_ref().unwrap(), &header_and_body)?;
 
         let smsg = SecureMessage {
-            header_and_body: hb.encode_to_vec(),
-            signature: result.into_bytes().to_vec(),
+            header_and_body,
+            signature,
         };
 
         self.send_frame(smsg.encode_to_vec()).await?;
@@ -1277,24 +1186,7 @@ impl InboundRequest {
     }
 
     async fn send_frame(&mut self, data: Vec<u8>) -> Result<(), anyhow::Error> {
-        let length = data.len();
-
-        // Prepare length prefix in big-endian format
-        let length_bytes = [
-            (length >> 24) as u8,
-            (length >> 16) as u8,
-            (length >> 8) as u8,
-            length as u8,
-        ];
-
-        let mut prefixed_length = Vec::with_capacity(length + 4);
-        prefixed_length.extend_from_slice(&length_bytes);
-        prefixed_length.extend_from_slice(&data);
-
-        self.socket.write_all(&prefixed_length).await?;
-        self.socket.flush().await?;
-
-        Ok(())
+        self.transport.write_frame(&data).await
     }
 
     async fn get_server_seq_inc(&mut self) -> i32 {

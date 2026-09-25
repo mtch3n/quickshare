@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use bluer::adv::Advertisement;
-use bluer::UuidExt;
+use bluer::{Uuid, UuidExt};
 use bytes::Bytes;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 const SERVICE_DATA: Bytes = Bytes::from_static(&[
     252, 18, 142, 1, 66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 191, 45, 91, 160, 225, 216, 117, 36, 202, 0,

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use p256::{PublicKey, SecretKey};
+use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -8,14 +8,13 @@ use self::info::{InternalFileInfo, TransferMetadata};
 use crate::securegcm::ukey2_client_init::CipherCommitment;
 use crate::utils::RemoteDeviceInfo;
 
-#[cfg(feature = "experimental")]
 mod ble;
-#[cfg(feature = "experimental")]
 pub use ble::*;
-#[cfg(all(feature = "experimental", target_os = "linux"))]
 mod blea;
-#[cfg(all(feature = "experimental", target_os = "linux"))]
 pub use blea::*;
+mod crypto;
+mod transport;
+pub use transport::Transport;
 mod inbound;
 pub use inbound::*;
 pub(crate) mod info;
@@ -26,7 +25,6 @@ pub use mdns::*;
 mod outbound;
 pub use outbound::*;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
 #[ts(export)]
 pub enum State {
@@ -68,7 +66,6 @@ pub struct InnerState {
     // Everything needed for encryption/decryption/verif
     pub cipher_commitment: Option<CipherCommitment>,
     pub private_key: Option<SecretKey>,
-    pub public_key: Option<PublicKey>,
     pub server_init_data: Option<Vec<u8>>,
     pub client_init_msg_data: Option<Vec<u8>>,
     pub ukey_client_finish_msg_data: Option<Vec<u8>>,
@@ -79,9 +76,6 @@ pub struct InnerState {
 
     // Used to handle/track ingress transfer
     pub text_payload: Option<TextPayloadInfo>,
-    // pub text_payload_id: i64,
-    // pub text_is_url: bool,
-    // pub wifi_ssid: Option<String>,
     pub payload_buffers: HashMap<i64, Vec<u8>>,
 }
 

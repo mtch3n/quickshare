@@ -1,15 +1,18 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mdns_sd::{AddrType, ServiceDaemon, ServiceInfo};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::watch;
-use tokio::time::{interval_at, Instant};
+use tokio::time::{Instant, interval_at};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
-use crate::utils::{gen_mdns_endpoint_info, gen_mdns_name, DeviceType};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+use crate::utils::{DeviceType, encode_endpoint_info, gen_mdns_name, hostname};
 
 const INNER_NAME: &str = "MDnsServer";
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
@@ -17,21 +20,9 @@ const TICK_INTERVAL: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum Visibility {
-    Visible = 0,
-    Invisible = 1,
-    Temporarily = 2,
-}
-
-#[allow(dead_code)]
-impl Visibility {
-    pub fn from_raw_value(value: u64) -> Self {
-        match value {
-            0 => Visibility::Visible,
-            1 => Visibility::Invisible,
-            2 => Visibility::Temporarily,
-            _ => unreachable!(),
-        }
-    }
+    Visible,
+    Invisible,
+    Temporarily,
 }
 
 pub struct MDnsServer {
@@ -52,8 +43,12 @@ impl MDnsServer {
     ) -> Result<Self, anyhow::Error> {
         let service_info = Self::build_service(endpoint_id, service_port, DeviceType::Laptop)?;
 
+        // The TCP listener is IPv4-only, so only announce IPv4 addresses.
+        let daemon = ServiceDaemon::new()?;
+        daemon.disable_interface(IfKind::IPv6)?;
+
         Ok(Self {
-            daemon: ServiceDaemon::new()?,
+            daemon,
             service_info,
             ble_receiver,
             visibility_sender,
@@ -88,7 +83,7 @@ impl MDnsServer {
                         self.daemon.register(self.service_info.clone())?;
                     } else if visibility == Visibility::Invisible {
                         let receiver = self.daemon.unregister(self.service_info.get_fullname())?;
-                        let _ = receiver.recv();
+                        let _ = receiver.recv_async().await;
                     } else if visibility == Visibility::Temporarily {
                         self.daemon.register(self.service_info.clone())?;
                         interval.reset();
@@ -104,7 +99,7 @@ impl MDnsServer {
                         // Android can sometime not see the mDNS service if the service
                         // was running BEFORE Android started the Discovery phase for QuickShare.
                         // So resend a broadcast if there's a android device sending.
-                        self.daemon.register_resend(self.service_info.get_fullname())?;
+                        self.daemon.register(self.service_info.clone())?;
                     } else {
                         self.daemon.register(self.service_info.clone())?;
                     }
@@ -115,7 +110,7 @@ impl MDnsServer {
                     }
 
                     let receiver = self.daemon.unregister(self.service_info.get_fullname())?;
-                    let _ = receiver.recv();
+                    let _ = receiver.recv_async().await;
                     let _ = self.visibility_sender.lock().unwrap().send(Visibility::Invisible);
                 }
             }
@@ -123,8 +118,8 @@ impl MDnsServer {
 
         // Unregister the mDNS service - we're shutting down
         let receiver = self.daemon.unregister(self.service_info.get_fullname())?;
-        if let Ok(event) = receiver.recv() {
-            info!("MDnsServer: service unregistered: {:?}", &event);
+        if let Ok(event) = receiver.recv_async().await {
+            info!("MDnsServer: service unregistered: {:?}", event);
         }
 
         Ok(())
@@ -136,21 +131,37 @@ impl MDnsServer {
         device_type: DeviceType,
     ) -> Result<ServiceInfo, anyhow::Error> {
         let name = gen_mdns_name(endpoint_id);
-        let hostname = sys_metrics::host::get_hostname()?;
+        let hostname = hostname();
         info!("Broadcasting with: {hostname}");
-        let endpoint_info = gen_mdns_endpoint_info(device_type as u8, &hostname);
+        let endpoint_info = URL_SAFE_NO_PAD.encode(encode_endpoint_info(device_type, &hostname));
 
         let properties = [("n", endpoint_info)];
         let si = ServiceInfo::new(
             "_FC9F5ED42C8A._tcp.local.",
             &name,
-            &hostname,
+            &mdns_host_name(&hostname),
             "",
             service_port,
             &properties[..],
         )?
-        .enable_addr_auto(AddrType::V4);
+        .enable_addr_auto();
 
         Ok(si)
+    }
+}
+
+/// mDNS host names must be ASCII labels; the display name travels separately in
+/// the endpoint info, so any safe label works here.
+fn mdns_host_name(hostname: &str) -> String {
+    let label: String = hostname
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let label = label.trim_matches('-');
+
+    if label.is_empty() {
+        "rquickshare.local.".to_string()
+    } else {
+        format!("{label}.local.")
     }
 }

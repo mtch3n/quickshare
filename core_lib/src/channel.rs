@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::hdl::info::TransferMetadata;
 use crate::hdl::State;
+use crate::hdl::info::TransferMetadata;
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, TS)]
 #[ts(export)]
