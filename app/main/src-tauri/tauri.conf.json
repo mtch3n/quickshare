@@ -4,8 +4,8 @@
   "mainBinaryName": "rquickshare",
   "identifier": "dev.mandre.rquickshare",
   "build": {
-    "beforeBuildCommand": "pnpm vite:build",
-    "beforeDevCommand": "pnpm vite:dev",
+    "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "pnpm dev",
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420"
   },
