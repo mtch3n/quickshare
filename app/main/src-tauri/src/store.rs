@@ -16,6 +16,9 @@ const KEEP_RUNNING: &str = "keep_running";
 const PORT: &str = "port";
 /// Log level override. Only settable by editing the file.
 const LOG_LEVEL: &str = "debug_level";
+const TRUSTED_DEVICES: &str = "trusted_devices";
+const AUTO_OPEN_LINKS: &str = "auto_open_links";
+const AUTO_COPY_TEXT: &str = "auto_copy_text";
 
 fn store(app: &AppHandle) -> Arc<Store<Wry>> {
     app.store_builder(".settings.json")
@@ -88,4 +91,37 @@ pub fn log_level(app: &AppHandle) -> Option<String> {
     store(app)
         .get(LOG_LEVEL)
         .and_then(|v| v.as_str().map(String::from))
+}
+
+pub fn trusted_devices(app: &AppHandle) -> Vec<String> {
+    store(app)
+        .get(TRUSTED_DEVICES)
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+pub fn set_trusted_devices(app: &AppHandle, devices: &[String]) {
+    store(app).set(TRUSTED_DEVICES, serde_json::json!(devices));
+}
+
+pub fn auto_open_links(app: &AppHandle) -> bool {
+    store(app)
+        .get(AUTO_OPEN_LINKS)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub fn set_auto_open_links(app: &AppHandle, enabled: bool) {
+    store(app).set(AUTO_OPEN_LINKS, enabled);
+}
+
+pub fn auto_copy_text(app: &AppHandle) -> bool {
+    store(app)
+        .get(AUTO_COPY_TEXT)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub fn set_auto_copy_text(app: &AppHandle, enabled: bool) {
+    store(app).set(AUTO_COPY_TEXT, enabled);
 }

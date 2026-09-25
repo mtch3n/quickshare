@@ -4,10 +4,12 @@ extern crate log;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use rqs_lib::channel::{ChannelDirection, ChannelMessage};
+use rqs_lib::channel::{ChannelAction, ChannelDirection, ChannelMessage};
 use rqs_lib::{EndpointInfo, RQS, SendInfo, State, Visibility};
 use tauri::{AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::logger::set_up_logging;
@@ -107,6 +109,10 @@ fn run() -> Result<(), anyhow::Error> {
             commands::transfer_action,
             commands::take_pending_files,
             commands::connect_wifi,
+            commands::trust_device,
+            commands::untrust_device,
+            commands::set_auto_open_links,
+            commands::set_auto_copy_text,
         ])
         .setup(move |app| {
             set_up_logging(app.app_handle())?;
@@ -190,6 +196,8 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
         let state: tauri::State<'_, AppState> = capp_handle.state();
         let tray: tauri::State<'_, TrayHandle> = capp_handle.state();
         let mut receiver = state.message_sender.subscribe();
+        let mut handled_finished: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         loop {
             match receiver.recv().await {
@@ -199,6 +207,9 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                     }
 
                     let waiting = info.state == Some(State::WaitingForUserConsent);
+                    let finished = info.state == Some(State::Finished);
+
+                    // Auto-accept from trusted devices
                     if waiting {
                         let name = info
                             .meta
@@ -206,8 +217,87 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                             .and_then(|meta| meta.source.as_ref())
                             .map(|source| source.name.clone())
                             .unwrap_or_else(|| "Unknown".to_string());
+
+                        let trusted_devices = store::trusted_devices(&capp_handle);
+                        if trusted_devices.contains(&name) {
+                            trace!("Auto-accepting from trusted device: {}", name);
+                            commands::send_action(
+                                &state,
+                                info.id.clone(),
+                                ChannelAction::AcceptTransfer,
+                            );
+                            if info.state.is_some() {
+                                tray.set_waiting(info.id.clone(), false).await;
+                            }
+                            continue;
+                        }
+
                         send_request_notification(name, info.id.clone(), &capp_handle);
                     }
+
+                    // Auto-open links, auto-copy text, and show received notification on Finished
+                    if finished && !handled_finished.contains(&info.id) {
+                        handled_finished.insert(info.id.clone());
+
+                        if let Some(meta) = &info.meta {
+                            // Auto-open links
+                            if store::auto_open_links(&capp_handle)
+                                && let Some(text_type) = &meta.text_type
+                            {
+                                let is_url = serde_json::to_value(text_type)
+                                    .ok()
+                                    .map(|v| v.as_str().map(|s| s == "Url").unwrap_or(false))
+                                    .unwrap_or(false);
+                                if is_url && let Some(url) = &meta.text_payload {
+                                    let opener = capp_handle.opener();
+                                    if let Err(e) = opener.open_url(url, None::<&str>) {
+                                        warn!("Couldn't auto-open URL: {e}");
+                                    }
+                                }
+                            }
+
+                            // Auto-copy text
+                            if store::auto_copy_text(&capp_handle)
+                                && let Some(text_type) = &meta.text_type
+                            {
+                                let is_text = serde_json::to_value(text_type)
+                                    .ok()
+                                    .map(|v| v.as_str().map(|s| s == "Text").unwrap_or(false))
+                                    .unwrap_or(false);
+                                if is_text && let Some(text) = &meta.text_payload {
+                                    let clipboard = capp_handle.clipboard();
+                                    if let Err(e) = clipboard.write_text(text.clone()) {
+                                        warn!("Couldn't auto-copy text: {e}");
+                                    }
+                                }
+                            }
+
+                            // Show received notification if window is not visible
+                            if let Some(window) = capp_handle.get_webview_window("main")
+                                && !window.is_visible().unwrap_or(false)
+                            {
+                                let source_name = meta
+                                    .source
+                                    .as_ref()
+                                    .map(|source| source.name.clone())
+                                    .unwrap_or_else(|| "A nearby device".to_string());
+                                let text_type_str = meta.text_type.as_ref().and_then(|t| {
+                                    serde_json::to_value(t)
+                                        .ok()
+                                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                });
+                                notification::send_received_notification(
+                                    source_name,
+                                    meta.files.clone(),
+                                    meta.destination.clone(),
+                                    text_type_str,
+                                    meta.text_payload.clone(),
+                                    &capp_handle,
+                                );
+                            }
+                        }
+                    }
+
                     if info.state.is_some() {
                         tray.set_waiting(info.id.clone(), waiting).await;
                     }

@@ -16,6 +16,10 @@ First release of this fork (mtch3n/quickshare). Linux only, distributed as an Ap
 * Connect to received Wi-Fi networks with one click (NetworkManager)
 * Experimental: receive from phones that turn Wi-Fi off while sharing (Pixel 10, Galaxy S26 with *Share with Apple devices*) over Bluetooth LE, moving the transfer to Wi-Fi LAN when possible (#425)
 * Custom device name: choose how this computer appears on other devices; settings page shows the effective name
+* Trusted devices: automatically accept transfers from devices you trust
+* Auto-open links: open received URLs in your default browser
+* Auto-copy text: automatically copy received text to your clipboard
+* "Received" notification when the window is hidden showing what was received and actions to open the folder, link or copy text
 
 ### Bug Fixes
 

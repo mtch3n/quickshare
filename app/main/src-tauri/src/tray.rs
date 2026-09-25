@@ -139,15 +139,12 @@ impl ksni::Tray for Tray {
             StandardItem {
                 label: "Send clipboard".into(),
                 activate: Box::new(|t: &mut Self| {
-                    let app = t.app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Ok(text) = app.clipboard().read_text().await {
-                            if !text.is_empty() {
-                                open_main_window(&app);
-                                let _ = app.emit("send_text", text);
-                            }
-                        }
-                    });
+                    if let Ok(text) = t.app.clipboard().read_text()
+                        && !text.is_empty()
+                    {
+                        open_main_window(&t.app);
+                        let _ = t.app.emit("send_text", text);
+                    }
                 }),
                 ..Default::default()
             }

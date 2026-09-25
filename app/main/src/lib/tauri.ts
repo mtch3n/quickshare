@@ -14,6 +14,9 @@ export type Settings = {
   downloadPath: string
   keepRunning: boolean
   fileManagerIntegration: boolean
+  trustedDevices: string[]
+  autoOpenLinks: boolean
+  autoCopyText: boolean
 }
 
 /** Commands implemented in src-tauri/src/commands.rs. */
@@ -37,6 +40,12 @@ export const api = {
   takePendingFiles: () => invoke<string[]>("take_pending_files"),
   connectWifi: (network: WifiNetwork) =>
     invoke<void>("connect_wifi", { network }),
+  trustDevice: (name: string) => invoke<void>("trust_device", { name }),
+  untrustDevice: (name: string) => invoke<void>("untrust_device", { name }),
+  setAutoOpenLinks: (enabled: boolean) =>
+    invoke<void>("set_auto_open_links", { enabled }),
+  setAutoCopyText: (enabled: boolean) =>
+    invoke<void>("set_auto_copy_text", { enabled }),
 }
 
 /** Events emitted by src-tauri/src/main.rs and tray.rs. */
