@@ -40,6 +40,7 @@ type Events = {
   rs2js_endpointinfo: EndpointInfo
   visibility_updated: Visibility
   send_files: string[]
+  send_text: string
   pick_files: null
 }
 
