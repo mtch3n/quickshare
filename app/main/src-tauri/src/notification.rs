@@ -1,7 +1,6 @@
 use notify_rust::{Hint, Notification, Urgency};
 use rqs_lib::Visibility;
 use rqs_lib::channel::ChannelAction;
-use rqs_lib::hdl::info::TransferMetadata;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
@@ -70,23 +69,21 @@ pub fn send_temporarily_notification(app_handle: &AppHandle) {
     });
 }
 
-pub fn send_received_notification(meta: TransferMetadata, app_handle: &AppHandle) {
-    let name = meta
-        .source
-        .as_ref()
-        .map(|source| source.name.clone())
-        .unwrap_or_else(|| "A nearby device".to_string());
-
-    let body = if let Some(files) = &meta.files {
+pub fn send_received_notification(
+    name: String,
+    files: Option<Vec<String>>,
+    destination: Option<String>,
+    text_type: Option<String>,
+    text_payload: Option<String>,
+    app_handle: &AppHandle,
+) {
+    let body = if let Some(files) = &files {
         if files.is_empty() {
-            if let Some(text_type) = &meta.text_type {
-                match text_type {
-                    rqs_lib::hdl::TextPayloadType::Url => "a link".to_string(),
-                    rqs_lib::hdl::TextPayloadType::Text => "some text".to_string(),
-                    rqs_lib::hdl::TextPayloadType::Wifi => "Wi-Fi info".to_string(),
-                }
-            } else {
-                "content".to_string()
+            match text_type.as_deref() {
+                Some("Url") => "a link".to_string(),
+                Some("Text") => "some text".to_string(),
+                Some("Wifi") => "Wi-Fi info".to_string(),
+                _ => "content".to_string(),
             }
         } else if files.len() == 1 {
             files[0].clone()
@@ -102,11 +99,11 @@ pub fn send_received_notification(meta: TransferMetadata, app_handle: &AppHandle
         .body(&body)
         .action("default", "Open folder");
 
-    match &meta.text_type {
-        Some(rqs_lib::hdl::TextPayloadType::Url) => {
+    match text_type.as_deref() {
+        Some("Url") => {
             notification = notification.action("open", "Open");
         }
-        Some(rqs_lib::hdl::TextPayloadType::Text) => {
+        Some("Text") => {
             notification = notification.action("copy", "Copy");
         }
         _ => {}
@@ -120,9 +117,6 @@ pub fn send_received_notification(meta: TransferMetadata, app_handle: &AppHandle
     };
 
     let app_handle = app_handle.clone();
-    let destination = meta.destination.clone();
-    let text_payload = meta.text_payload.clone();
-    let text_type = meta.text_type.clone();
 
     tokio::task::spawn_blocking(move || {
         n.wait_for_action(move |action| match action {
