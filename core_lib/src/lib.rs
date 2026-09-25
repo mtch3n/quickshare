@@ -27,7 +27,7 @@ mod manager;
 mod utils;
 
 pub use hdl::info::{WifiNetwork, WifiSecurity};
-pub use hdl::{EndpointInfo, OutboundPayload, State, Visibility};
+pub use hdl::{EndpointInfo, OutboundPayload, State, TextPayloadType, Visibility};
 pub use manager::SendInfo;
 pub use utils::{
     DeviceType, effective_device_name, get_download_dir, hostname, normalize_device_name,

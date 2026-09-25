@@ -140,7 +140,9 @@ pub fn send_received_notification(
                 open_main_window(&app_handle);
             }
             "open" => {
-                if let Some(url) = &text_payload {
+                if let Some(url) = &text_payload
+                    && crate::is_web_url(url)
+                {
                     let opener = app_handle.opener();
                     if let Err(e) = opener.open_url(url, None::<&str>) {
                         error!("Couldn't open URL: {e}");

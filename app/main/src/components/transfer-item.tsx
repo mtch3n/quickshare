@@ -25,7 +25,7 @@ import { Progress } from "@/components/ui/progress"
 import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/components/ui/toast"
 import { type Transfer, isTerminal, useQuickShare } from "@/hooks/quick-share"
-import { percent } from "@/lib/format"
+import { isWebUrl, percent } from "@/lib/format"
 import { describeContent } from "@/lib/transfer"
 import { api } from "@/lib/tauri"
 import type { WifiNetwork } from "@bindings/WifiNetwork"
@@ -137,12 +137,15 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
             Copy
           </Button>
         )}
-        {state === "Finished" && meta?.text_type === "Url" && text && (
-          <Button size="sm" onClick={() => openUrl(text)}>
-            <ExternalLinkIcon data-icon="inline-start" />
-            Open
-          </Button>
-        )}
+        {state === "Finished" &&
+          meta?.text_type === "Url" &&
+          text &&
+          isWebUrl(text) && (
+            <Button size="sm" onClick={() => openUrl(text)}>
+              <ExternalLinkIcon data-icon="inline-start" />
+              Open
+            </Button>
+          )}
         {state === "Finished" &&
           direction === "Inbound" &&
           !text &&

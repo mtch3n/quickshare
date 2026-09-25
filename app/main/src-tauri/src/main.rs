@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rqs_lib::channel::{ChannelAction, ChannelDirection, ChannelMessage};
-use rqs_lib::{EndpointInfo, RQS, SendInfo, State, Visibility};
+use rqs_lib::{EndpointInfo, RQS, SendInfo, State, TextPayloadType, Visibility};
 use tauri::{AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -242,34 +242,21 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                         if let Some(meta) = &info.meta {
                             // Auto-open links
                             if store::auto_open_links(&capp_handle)
-                                && let Some(text_type) = &meta.text_type
+                                && matches!(meta.text_type, Some(TextPayloadType::Url))
+                                && let Some(url) = &meta.text_payload
+                                && is_web_url(url)
+                                && let Err(e) = capp_handle.opener().open_url(url, None::<&str>)
                             {
-                                let is_url = serde_json::to_value(text_type)
-                                    .ok()
-                                    .map(|v| v.as_str().map(|s| s == "Url").unwrap_or(false))
-                                    .unwrap_or(false);
-                                if is_url && let Some(url) = &meta.text_payload {
-                                    let opener = capp_handle.opener();
-                                    if let Err(e) = opener.open_url(url, None::<&str>) {
-                                        warn!("Couldn't auto-open URL: {e}");
-                                    }
-                                }
+                                warn!("Couldn't auto-open URL: {e}");
                             }
 
                             // Auto-copy text
                             if store::auto_copy_text(&capp_handle)
-                                && let Some(text_type) = &meta.text_type
+                                && matches!(meta.text_type, Some(TextPayloadType::Text))
+                                && let Some(text) = &meta.text_payload
+                                && let Err(e) = capp_handle.clipboard().write_text(text.clone())
                             {
-                                let is_text = serde_json::to_value(text_type)
-                                    .ok()
-                                    .map(|v| v.as_str().map(|s| s == "Text").unwrap_or(false))
-                                    .unwrap_or(false);
-                                if is_text && let Some(text) = &meta.text_payload {
-                                    let clipboard = capp_handle.clipboard();
-                                    if let Err(e) = clipboard.write_text(text.clone()) {
-                                        warn!("Couldn't auto-copy text: {e}");
-                                    }
-                                }
+                                warn!("Couldn't auto-copy text: {e}");
                             }
 
                             // Show received notification if window is not visible
@@ -281,11 +268,8 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                                     .as_ref()
                                     .map(|source| source.name.clone())
                                     .unwrap_or_else(|| "A nearby device".to_string());
-                                let text_type_str = meta.text_type.as_ref().and_then(|t| {
-                                    serde_json::to_value(t)
-                                        .ok()
-                                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                                });
+                                let text_type_str =
+                                    meta.text_type.as_ref().map(|t| format!("{t:?}"));
                                 notification::send_received_notification(
                                     source_name,
                                     meta.files.clone(),
@@ -439,4 +423,12 @@ fn fix_wayland_titlebar(window: &tauri::WebviewWindow) {
     {
         event_box.set_above_child(false);
     }
+}
+
+/// Links from peers are only opened if they are web links: a `file:` or custom
+/// scheme URL would hand attacker-controlled input to arbitrary handlers.
+pub fn is_web_url(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.contains(char::is_whitespace)
 }
