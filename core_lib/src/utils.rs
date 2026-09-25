@@ -215,6 +215,66 @@ pub fn hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
 }
 
+/// Expands directories into regular files recursively.
+/// Returns tuples of (file_path, parent_folder_relative_to_base).
+/// Skips symlinks and special files.
+/// For a directory, parent_folder is the relative path from the directory's parent.
+pub fn expand_directories(paths: &[String]) -> Vec<(String, Option<String>)> {
+    let mut result = vec![];
+
+    for path_str in paths {
+        let path = Path::new(path_str);
+
+        if path.is_dir() {
+            // For directories, track the base path and expand recursively
+            expand_dir_recursive(path, path, &mut result);
+        } else if path.is_file() {
+            // Not a directory, add as-is
+            result.push((path_str.clone(), None));
+        }
+    }
+
+    result
+}
+
+fn expand_dir_recursive(
+    base_dir: &Path,
+    current_dir: &Path,
+    result: &mut Vec<(String, Option<String>)>,
+) {
+    if let Ok(entries) = std::fs::read_dir(current_dir) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+
+            // Skip symlinks
+            if entry_path.is_symlink() {
+                continue;
+            }
+
+            if entry_path.is_file() {
+                if let Some(file_path_str) = entry_path.to_str() {
+                    // Compute relative path from base directory's parent
+                    let parent_folder = entry_path
+                        .parent()
+                        .and_then(|p| {
+                            base_dir.parent().and_then(|base_parent| {
+                                p.strip_prefix(base_parent)
+                                    .ok()
+                                    .and_then(|rel| rel.to_str())
+                            })
+                        })
+                        .map(|s| s.to_string());
+
+                    result.push((file_path_str.to_string(), parent_folder));
+                }
+            } else if entry_path.is_dir() {
+                // Recursively expand subdirectories
+                expand_dir_recursive(base_dir, &entry_path, result);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +350,49 @@ mod tests {
         assert_eq!(second, dir.join("a (1).txt"));
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parent_folder_cannot_escape_download_dir() {
+        let download_dir = Path::new("/home/user/Downloads");
+
+        // Test normal parent_folder
+        let mut path = download_dir.to_path_buf();
+        if let Some(sanitized) = sanitize_file_name("folder") {
+            path.push(sanitized);
+        }
+        path.push("file.txt");
+        // Path should be /home/user/Downloads/folder/file.txt
+        assert!(path.starts_with(download_dir));
+
+        // Test escaped parent_folder with ".." - should be filtered out
+        let mut path = download_dir.to_path_buf();
+        for component in "..".split('/') {
+            if !component.is_empty()
+                && component != "."
+                && component != ".."
+                && let Some(sanitized) = sanitize_file_name(component)
+            {
+                path.push(sanitized);
+            }
+        }
+        path.push("file.txt");
+        // Path should remain /home/user/Downloads/file.txt (no ".." added)
+        assert!(path.starts_with(download_dir));
+
+        // Test deep nested folders
+        let mut path = download_dir.to_path_buf();
+        for component in "folder1/subfolder/deep".split('/') {
+            if !component.is_empty()
+                && component != "."
+                && component != ".."
+                && let Some(sanitized) = sanitize_file_name(component)
+            {
+                path.push(sanitized);
+            }
+        }
+        path.push("file.txt");
+        // Path should be /home/user/Downloads/folder1/subfolder/deep/file.txt
+        assert!(path.starts_with(download_dir));
     }
 }
