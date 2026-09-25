@@ -94,21 +94,30 @@ pub fn send_received_notification(
         "content".to_string()
     };
 
-    let mut notification = base()
-        .summary(&format!("Received from {}", name))
-        .body(&body)
-        .action("default", "Open folder");
-
     let has_url = text_type.as_deref() == Some("Url");
     let has_text = text_type.as_deref() == Some("Text");
 
-    if has_url {
-        notification = notification.action("open", "Open");
+    let shown = if has_url {
+        base()
+            .summary(&format!("Received from {}", name))
+            .body(&body)
+            .action("default", "Open folder")
+            .action("open", "Open")
+            .show()
     } else if has_text {
-        notification = notification.action("copy", "Copy");
-    }
-
-    let shown = notification.show();
+        base()
+            .summary(&format!("Received from {}", name))
+            .body(&body)
+            .action("default", "Open folder")
+            .action("copy", "Copy")
+            .show()
+    } else {
+        base()
+            .summary(&format!("Received from {}", name))
+            .body(&body)
+            .action("default", "Open folder")
+            .show()
+    };
 
     let n = match shown {
         Ok(n) => n,
