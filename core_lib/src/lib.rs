@@ -83,11 +83,8 @@ impl RQS {
         download_path: Option<PathBuf>,
         device_name: Option<String>,
     ) -> Self {
-        let mut guard = CUSTOM_DOWNLOAD.write().unwrap();
-        *guard = download_path;
-
-        let mut dn_guard = CUSTOM_DEVICE_NAME.write().unwrap();
-        *dn_guard = device_name;
+        *CUSTOM_DOWNLOAD.write().unwrap() = download_path;
+        *CUSTOM_DEVICE_NAME.write().unwrap() = device_name;
 
         let (message_sender, _) = broadcast::channel(50);
         let (ble_sender, _) = broadcast::channel(5);
@@ -255,13 +252,10 @@ impl RQS {
     }
 
     pub fn set_device_name(&self, name: String) {
-        let effective_name = utils::normalize_device_name(&name);
-        let mut dn_guard = CUSTOM_DEVICE_NAME.write().unwrap();
-        *dn_guard = if effective_name.is_empty() {
-            None
-        } else {
-            Some(effective_name.clone())
-        };
+        let name = utils::normalize_device_name(&name);
+        *CUSTOM_DEVICE_NAME.write().unwrap() = (!name.is_empty()).then_some(name);
+
+        let effective_name = utils::effective_device_name();
         self.device_name_sender
             .lock()
             .unwrap()
@@ -288,5 +282,19 @@ impl RQS {
         debug!("Setting the download path to {:?}", p);
         let mut guard = CUSTOM_DOWNLOAD.write().unwrap();
         *guard = p;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_name_falls_back_to_hostname() {
+        let rqs = RQS::new(Visibility::Visible, None, None, Some("Desk".into()));
+        assert_eq!(*rqs.device_name_receiver.borrow(), "Desk");
+
+        rqs.set_device_name("  ".into());
+        assert_eq!(*rqs.device_name_receiver.borrow(), utils::hostname());
     }
 }
