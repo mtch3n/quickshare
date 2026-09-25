@@ -239,8 +239,7 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                                 if let Some(text_type) = &meta.text_type {
                                     let is_url = serde_json::to_value(text_type)
                                         .ok()
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s == "Url")
+                                        .map(|v| v.as_str().map(|s| s == "Url").unwrap_or(false))
                                         .unwrap_or(false);
                                     if is_url {
                                         if let Some(url) = &meta.text_payload {
@@ -258,8 +257,7 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                                 if let Some(text_type) = &meta.text_type {
                                     let is_text = serde_json::to_value(text_type)
                                         .ok()
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s == "Text")
+                                        .map(|v| v.as_str().map(|s| s == "Text").unwrap_or(false))
                                         .unwrap_or(false);
                                     if is_text {
                                         if let Some(text) = &meta.text_payload {

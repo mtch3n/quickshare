@@ -99,14 +99,13 @@ pub fn send_received_notification(
         .body(&body)
         .action("default", "Open folder");
 
-    match text_type.as_deref() {
-        Some("Url") => {
-            notification = notification.action("open", "Open");
-        }
-        Some("Text") => {
-            notification = notification.action("copy", "Copy");
-        }
-        _ => {}
+    let has_url = text_type.as_deref() == Some("Url");
+    let has_text = text_type.as_deref() == Some("Text");
+
+    if has_url {
+        notification = notification.action("open", "Open");
+    } else if has_text {
+        notification = notification.action("copy", "Copy");
     }
 
     let shown = notification.show();
