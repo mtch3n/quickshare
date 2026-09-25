@@ -12,6 +12,8 @@ mod ble;
 pub use ble::*;
 mod blea;
 pub use blea::*;
+mod bwu;
+pub use bwu::{UpgradeRegistry, WifiLanUpgrade, client_introduction};
 mod crypto;
 mod gatt;
 pub use gatt::GattServer;

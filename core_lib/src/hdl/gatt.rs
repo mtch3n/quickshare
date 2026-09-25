@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
 
-use super::{InboundRequest, Transport};
+use super::{InboundRequest, Transport, WifiLanUpgrade};
 use crate::channel::ChannelMessage;
 use crate::utils::SERVICE_ID_HASH;
 
@@ -215,6 +215,7 @@ pub struct GattServer {
     packets: mpsc::UnboundedReceiver<(Address, Vec<u8>)>,
     notifiers: mpsc::UnboundedReceiver<CharacteristicNotifier>,
     sender: Sender<ChannelMessage>,
+    upgrade: WifiLanUpgrade,
 
     notifier: Option<CharacteristicNotifier>,
     connection: Option<WeaveConnection>,
@@ -227,6 +228,7 @@ impl GattServer {
     pub async fn new(
         advertisement: Vec<u8>,
         sender: Sender<ChannelMessage>,
+        upgrade: WifiLanUpgrade,
     ) -> Result<Self, anyhow::Error> {
         let session = bluer::Session::new().await?;
         let adapter = session.default_adapter().await?;
@@ -295,6 +297,7 @@ impl GattServer {
             packets,
             notifiers,
             sender,
+            upgrade,
             notifier: None,
             connection: None,
             pending_connect: None,
@@ -416,8 +419,9 @@ impl GattServer {
         let id = format!("ble-{:08x}", rand::random::<u32>());
         info!("{INNER_NAME}: weave socket open with {device} as {id} ({packet_size}-byte packets)");
 
-        let inbound = InboundRequest::new(Transport::new(inbound_side), id, self.sender.clone());
-        tokio::spawn(inbound.run());
+        let inbound = InboundRequest::new(Transport::new(inbound_side), id, self.sender.clone())
+            .with_wifi_lan_upgrade(self.upgrade.clone());
+        tokio::spawn(inbound.run(None));
 
         self.connection = Some(WeaveConnection {
             device,

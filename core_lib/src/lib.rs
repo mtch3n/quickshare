@@ -14,7 +14,10 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::hdl::{BleListener, GattServer, MDnsServer, ReceiverAdvertiser, receiver_advertisement};
+use crate::hdl::{
+    BleListener, GattServer, MDnsServer, ReceiverAdvertiser, UpgradeRegistry, WifiLanUpgrade,
+    receiver_advertisement,
+};
 use crate::manager::TcpServer;
 
 pub mod channel;
@@ -107,6 +110,12 @@ impl RQS {
         let binded_addr = tcp_listener.local_addr()?;
         info!("TcpListener on: {}", binded_addr);
 
+        // BLE sessions move to Wi-Fi through the TCP listener.
+        let upgrade = WifiLanUpgrade {
+            port: binded_addr.port(),
+            registry: UpgradeRegistry::default(),
+        };
+
         // MPSC for the TcpServer
         let send_channel = mpsc::channel(10);
         // Start TcpServer in own "task"
@@ -115,6 +124,7 @@ impl RQS {
             tcp_listener,
             self.message_sender.clone(),
             send_channel.1,
+            upgrade.registry.clone(),
         )?;
         let ctk = ctoken.clone();
         tracker.spawn(async move { server.run(ctk).await });
@@ -151,7 +161,7 @@ impl RQS {
         let visibility = self.visibility_receiver.clone();
         let ctk = ctoken.clone();
         tracker.spawn(async move {
-            let gatt = match GattServer::new(advertisement.clone(), sender).await {
+            let gatt = match GattServer::new(advertisement.clone(), sender, upgrade).await {
                 Ok(gatt) => gatt,
                 Err(e) => {
                     warn!("Receiving over Bluetooth unavailable: {e}");

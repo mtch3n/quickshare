@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -136,6 +136,34 @@ pub fn get_download_dir() -> PathBuf {
     }
 
     Path::new("/").to_path_buf()
+}
+
+/// The address phones on our LAN reach us at, offered for Wi-Fi upgrades: the
+/// source address of the default route (which skips container bridges),
+/// else the first private address.
+pub fn lan_ipv4() -> Option<Ipv4Addr> {
+    let routed = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .and_then(|socket| {
+            // Only selects a route, nothing is sent. TEST-NET-1 has no route of
+            // its own, so the default route is picked.
+            socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
+            socket.local_addr()
+        })
+        .ok()
+        .and_then(|addr| match addr.ip() {
+            IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+            _ => None,
+        });
+
+    routed.or_else(|| {
+        if_addrs::get_if_addrs()
+            .ok()?
+            .into_iter()
+            .find_map(|iface| match iface.ip() {
+                IpAddr::V4(ip) if ip.is_private() => Some(ip),
+                _ => None,
+            })
+    })
 }
 
 pub fn is_not_self_ip(ip_address: &Ipv4Addr) -> bool {
