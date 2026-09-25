@@ -14,6 +14,7 @@ First release of this fork (mtch3n/quickshare). Linux only, distributed as an Ap
 * Send text and links directly from the app or clipboard via tray menu
 * Send folders recursively with preserved directory structure
 * Experimental: receive from phones that turn Wi-Fi off while sharing (Pixel 10, Galaxy S26 with *Share with Apple devices*) over Bluetooth LE, moving the transfer to Wi-Fi LAN when possible (#425)
+* Custom device name: choose how this computer appears on other devices; settings page shows the effective name
 
 ### Bug Fixes
 

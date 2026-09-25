@@ -28,6 +28,7 @@ pub struct AppState {
     pub message_sender: broadcast::Sender<ChannelMessage>,
     pub dch_sender: broadcast::Sender<EndpointInfo>,
     pub visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
+    pub device_name_sender: Arc<Mutex<watch::Sender<String>>>,
     pub sender_file: mpsc::Sender<SendInfo>,
     pub ble_receiver: broadcast::Receiver<()>,
     pub rqs: Mutex<RQS>,
@@ -96,6 +97,7 @@ fn run() -> Result<(), anyhow::Error> {
             commands::get_settings,
             commands::set_visibility,
             commands::set_download_path,
+            commands::set_device_name,
             commands::set_keep_running,
             commands::set_file_manager_integration,
             commands::start_discovery,
@@ -119,18 +121,20 @@ fn run() -> Result<(), anyhow::Error> {
             let visibility = store::visibility(app.app_handle());
             let port_number = store::port(app.app_handle());
             let download_path = store::download_path(app.app_handle());
+            let device_name = store::device_name(app.app_handle());
 
             let app_handle = app.app_handle().clone();
             // Block until the service is up so the logger is already in place
             // and every command can rely on AppState being managed.
             tauri::async_runtime::block_on(async move {
-                let mut rqs = RQS::new(visibility, port_number, download_path);
+                let mut rqs = RQS::new(visibility, port_number, download_path, device_name);
                 let (sender_file, ble_receiver) = rqs.run().await?;
 
                 app_handle.manage(AppState {
                     message_sender: rqs.message_sender.clone(),
                     dch_sender: broadcast::channel(10).0,
                     visibility_sender: rqs.visibility_sender.clone(),
+                    device_name_sender: rqs.device_name_sender.clone(),
                     sender_file,
                     ble_receiver,
                     rqs: Mutex::new(rqs),
@@ -247,6 +251,18 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
             store::set_visibility(&capp_handle, v);
             let _ = capp_handle.emit("visibility_updated", v);
             tray.set_visibility(v).await;
+        }
+    });
+
+    let capp_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let state: tauri::State<'_, AppState> = capp_handle.state();
+        let mut device_name_receiver = state.device_name_sender.lock().unwrap().subscribe();
+
+        while device_name_receiver.changed().await.is_ok() {
+            let name = device_name_receiver.borrow_and_update().clone();
+            store::set_device_name(&capp_handle, Some(&name));
+            let _ = capp_handle.emit("device_name_updated", &name);
         }
     });
 

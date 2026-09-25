@@ -100,6 +100,9 @@ export function QuickShareProvider({
       on("visibility_updated", (visibility) =>
         setSettings((s) => (s ? { ...s, visibility } : s))
       ),
+      on("device_name_updated", (deviceName) =>
+        setSettings((s) => (s ? { ...s, deviceName } : s))
+      ),
     ]
 
     return () => unlisten.forEach((p) => p.then((f) => f()))

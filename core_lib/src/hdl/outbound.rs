@@ -219,10 +219,10 @@ impl OutboundRequest {
                 ),
                 connection_request: Some(location_nearby_connections::ConnectionRequestFrame {
                     endpoint_id: Some(String::from_utf8_lossy(&self.endpoint_id).to_string()),
-                    endpoint_name: Some(crate::utils::hostname().into()),
+                    endpoint_name: Some(crate::utils::effective_device_name().into()),
                     endpoint_info: Some(encode_endpoint_info(
                         DeviceType::Laptop,
-                        &crate::utils::hostname(),
+                        &crate::utils::effective_device_name(),
                     )),
                     mediums: vec![Medium::WifiLan.into()],
                     keep_alive_interval_millis: Some(5_000),

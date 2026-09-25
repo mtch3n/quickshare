@@ -19,6 +19,7 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { toast } from "@/components/ui/toast"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { DeviceNameField } from "@/components/device-name-field"
 import { useQuickShare } from "@/hooks/quick-share"
 import { api } from "@/lib/tauri"
 
@@ -76,6 +77,10 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
       </header>
 
       <FieldGroup>
+        <DeviceNameField />
+
+        <FieldSeparator />
+
         <Field>
           <FieldTitle>Download folder</FieldTitle>
           <FieldDescription className="truncate select-text">

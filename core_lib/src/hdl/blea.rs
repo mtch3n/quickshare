@@ -112,36 +112,46 @@ pub fn receiver_advertisement(endpoint_id: [u8; 4], name: &str) -> Vec<u8> {
 /// visible, so phones that left Wi-Fi to share can still list us.
 pub struct ReceiverAdvertiser {
     adapter: bluer::Adapter,
-    advertisement: Vec<u8>,
+    endpoint_id: [u8; 4],
     visibility: watch::Receiver<Visibility>,
+    device_name_receiver: watch::Receiver<String>,
 }
 
 impl ReceiverAdvertiser {
     pub fn new(
         adapter: bluer::Adapter,
-        advertisement: Vec<u8>,
+        endpoint_id: [u8; 4],
         visibility: watch::Receiver<Visibility>,
+        device_name_receiver: watch::Receiver<String>,
     ) -> Self {
         Self {
             adapter,
-            advertisement,
+            endpoint_id,
             visibility,
+            device_name_receiver,
         }
     }
 
     pub async fn run(mut self, ctk: CancellationToken) {
+        let device_name = self.device_name_receiver.borrow().clone();
+        let advertisement = receiver_advertisement(self.endpoint_id, &device_name);
         info!(
             "{RX_INNER_NAME}: service starting on {} ({} bytes)",
             self.adapter.name(),
-            self.advertisement.len()
+            advertisement.len()
         );
 
         let mut failing = false;
+        let mut current_advertisement = advertisement;
         loop {
             let visible = *self.visibility.borrow_and_update() != Visibility::Invisible;
 
             let handle = if visible {
-                match self.adapter.advertise(self.build()).await {
+                match self
+                    .adapter
+                    .advertise(self.build(&current_advertisement))
+                    .await
+                {
                     Ok(handle) => {
                         if failing {
                             info!("{RX_INNER_NAME}: advertising again");
@@ -172,6 +182,14 @@ impl ReceiverAdvertiser {
                         return;
                     }
                 }
+                r = self.device_name_receiver.changed() => {
+                    if r.is_err() {
+                        return;
+                    }
+                    let device_name = self.device_name_receiver.borrow_and_update().clone();
+                    current_advertisement = receiver_advertisement(self.endpoint_id, &device_name);
+                    debug!("{RX_INNER_NAME}: device name changed, rebuilt advertisement ({} bytes)", current_advertisement.len());
+                }
                 _ = tokio::time::sleep(READVERTISE_INTERVAL), if visible => {}
             }
 
@@ -179,10 +197,10 @@ impl ReceiverAdvertiser {
         }
     }
 
-    fn build(&self) -> Advertisement {
+    fn build(&self, advertisement_bytes: &[u8]) -> Advertisement {
         Advertisement {
             advertisement_type: bluer::adv::Type::Peripheral,
-            service_data: [(Uuid::from_u16(SERVICE_UUID), self.advertisement.clone())].into(),
+            service_data: [(Uuid::from_u16(SERVICE_UUID), advertisement_bytes.to_vec())].into(),
             discoverable: Some(true),
             min_interval: Some(MIN_INTERVAL),
             max_interval: Some(MAX_INTERVAL),

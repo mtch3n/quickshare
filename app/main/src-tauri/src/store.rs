@@ -10,6 +10,7 @@ use tauri_plugin_store::{Store, StoreExt};
 
 const VISIBILITY: &str = "visibility";
 const DOWNLOAD_PATH: &str = "download_path";
+const DEVICE_NAME: &str = "device_name";
 const KEEP_RUNNING: &str = "keep_running";
 /// Fixed TCP port, for firewalls. Only settable by editing the file.
 const PORT: &str = "port";
@@ -45,6 +46,21 @@ pub fn set_download_path(app: &AppHandle, path: Option<&PathBuf>) {
         Some(path) => store(app).set(DOWNLOAD_PATH, path.to_string_lossy().as_ref()),
         None => {
             store(app).delete(DOWNLOAD_PATH);
+        }
+    }
+}
+
+pub fn device_name(app: &AppHandle) -> Option<String> {
+    store(app)
+        .get(DEVICE_NAME)
+        .and_then(|v| v.as_str().map(String::from))
+}
+
+pub fn set_device_name(app: &AppHandle, name: Option<&str>) {
+    match name {
+        Some(name) => store(app).set(DEVICE_NAME, name),
+        None => {
+            store(app).delete(DEVICE_NAME);
         }
     }
 }

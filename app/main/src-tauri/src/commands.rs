@@ -21,8 +21,11 @@ pub struct Settings {
 
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> Settings {
+    let effective_name = store::device_name(&app)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(rqs_lib::hostname);
     Settings {
-        device_name: rqs_lib::hostname(),
+        device_name: effective_name,
         visibility: store::visibility(&app),
         download_path: rqs_lib::get_download_dir().to_string_lossy().into_owned(),
         keep_running: store::keep_running(&app),
@@ -43,6 +46,26 @@ pub fn set_download_path(path: Option<String>, app: AppHandle, state: State<'_, 
     let path = path.map(PathBuf::from);
     store::set_download_path(&app, path.as_ref());
     state.rqs.lock().unwrap().set_download_path(path);
+}
+
+/// `None` resets to the computer's hostname.
+#[tauri::command]
+pub fn set_device_name(name: Option<String>, app: AppHandle, state: State<'_, AppState>) {
+    let normalized = name.map(|n| rqs_lib::normalize_device_name(&n));
+    let effective_name = normalized
+        .as_ref()
+        .and_then(|s| if s.is_empty() { None } else { Some(s.as_str()) });
+
+    store::set_device_name(&app, effective_name);
+    if let Some(effective) = effective_name {
+        state
+            .rqs
+            .lock()
+            .unwrap()
+            .set_device_name(effective.to_string());
+    } else {
+        state.rqs.lock().unwrap().set_device_name(String::new());
+    }
 }
 
 #[tauri::command]
