@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 100 100">
+  <style>.ColorScheme-Text { color: #2e3436; }</style>
+  <g class="ColorScheme-Text" style="fill:currentColor">
+    <path d="M90.50,45.47 A40.75,40.75 0 0 0 10.85,38.68 L19.98,41.32 A31.25,31.25 0 0 1 81.06,46.53 Z"/>
+    <circle cx="85.78" cy="46.00" r="4.75"/>
+    <rect x="10.67" y="35.25" width="42.08" height="9.50" rx="4.75" transform="rotate(0.00 15.42 40.00)"/>
+    <rect x="43.25" y="35.25" width="23.64" height="9.50" rx="4.75" transform="rotate(-135.00 48.00 40.00)"/>
+    <rect x="43.25" y="35.25" width="23.64" height="9.50" rx="4.75" transform="rotate(135.00 48.00 40.00)"/>
+    <path d="M9.50,54.53 A40.75,40.75 0 0 0 89.15,61.32 L80.02,58.68 A31.25,31.25 0 0 1 18.94,53.47 Z"/>
+    <circle cx="14.22" cy="54.00" r="4.75"/>
+    <rect x="79.83" y="55.25" width="42.08" height="9.50" rx="4.75" transform="rotate(180.00 84.58 60.00)"/>
+    <rect x="47.25" y="55.25" width="23.64" height="9.50" rx="4.75" transform="rotate(-45.00 52.00 60.00)"/>
+    <rect x="47.25" y="55.25" width="23.64" height="9.50" rx="4.75" transform="rotate(45.00 52.00 60.00)"/>
+  </g>
+</svg>

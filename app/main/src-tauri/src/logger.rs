@@ -1,37 +1,23 @@
-use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use std::time::SystemTime;
 
 use fern::colors::{Color, ColoredLevelConfig};
-use tauri::AppHandle;
-use tauri::Manager;
-use time::OffsetDateTime;
+use tauri::{AppHandle, Manager};
 
-use crate::store::get_logging_level;
+use crate::store;
 
 pub fn set_up_logging(app_handle: &AppHandle) -> Result<(), anyhow::Error> {
-    let default_level = match std::env::var("RQS_LOG") {
-        Ok(r) => {
-            println!("set_up_logging: level asked: {:?}", r);
-            log::LevelFilter::from_str(&r).unwrap_or(log::LevelFilter::Debug)
-        }
-        Err(_) => match get_logging_level(app_handle) {
-            Some(level_str) => {
-                println!("set_up_logging: level from config: {:?}", level_str);
-                log::LevelFilter::from_str(&level_str).unwrap_or(log::LevelFilter::Info)
-            }
-            None => {
-                if cfg!(debug_assertions) {
-                    log::LevelFilter::Trace
-                } else {
-                    log::LevelFilter::Info
-                }
-            }
-        },
-    };
+    let default_level = std::env::var("RQS_LOG")
+        .ok()
+        .or_else(|| store::log_level(app_handle))
+        .and_then(|level| log::LevelFilter::from_str(&level).ok())
+        .unwrap_or(if cfg!(debug_assertions) {
+            log::LevelFilter::Trace
+        } else {
+            log::LevelFilter::Info
+        });
 
-    println!("set_up_logging: level: {:?}", default_level);
     let colors = ColoredLevelConfig::new()
         .error(Color::Red)
         .warn(Color::Yellow)
@@ -52,66 +38,31 @@ pub fn set_up_logging(app_handle: &AppHandle) -> Result<(), anyhow::Error> {
         .level(default_level)
         .level_for("mdns_sd", log::LevelFilter::Error)
         .level_for("polling", log::LevelFilter::Error)
-        .level_for("neli", log::LevelFilter::Error)
-        .level_for("bluez_async", log::LevelFilter::Error)
         .level_for("bluer", log::LevelFilter::Error)
         .level_for("async_io", log::LevelFilter::Error)
-        .level_for("polling", log::LevelFilter::Error)
-        .level_for("btleplug", log::LevelFilter::Error)
         .chain(std::io::stdout());
 
-    if let Ok(path) = app_handle.path().app_log_dir() {
-        if !path.exists() {
-            std::fs::create_dir_all(&path)?;
-        }
+    if let Ok(dir) = app_handle.path().app_log_dir() {
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.log", app_handle.package_info().name));
+        rotate(&path)?;
 
-        let app_name = &app_handle.package_info().name;
-        let file_logger = fern::log_file(get_log_file_path(&path, app_name, 40000)?)?;
-
-        dispatch.chain(file_logger).apply()?;
+        dispatch.chain(fern::log_file(path)?).apply()?;
     } else {
         dispatch.apply()?;
     }
 
-    debug!("Finished setting up logging! yay!");
+    debug!("Finished setting up logging");
     Ok(())
 }
 
-fn get_log_file_path(
-    dir: &impl AsRef<Path>,
-    file_name: &str,
-    max_file_size: u128,
-) -> Result<PathBuf, anyhow::Error> {
-    let path = dir.as_ref().join(format!("{file_name}.log"));
+/// Keeps a single previous log around once the current one grows past the limit.
+fn rotate(path: &Path) -> Result<(), anyhow::Error> {
+    const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
 
-    if path.exists() {
-        let log_size = File::open(&path)?.metadata()?.len() as u128;
-        if log_size > max_file_size {
-            let to = dir.as_ref().join(format!(
-                "{}_{}.log",
-                file_name,
-                OffsetDateTime::now_utc()
-                    .format(
-                        &time::format_description::parse(
-                            "[year]-[month]-[day]_[hour]-[minute]-[second]"
-                        )
-                        .unwrap()
-                    )
-                    .unwrap(),
-            ));
-
-            if to.is_file() {
-                let mut to_bak = to.clone();
-                to_bak.set_file_name(format!(
-                    "{}.bak",
-                    to_bak.file_name().unwrap().to_string_lossy()
-                ));
-                std::fs::rename(&to, to_bak)?;
-            }
-
-            std::fs::rename(&path, to)?;
-        }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_LOG_SIZE) {
+        std::fs::rename(path, path.with_extension("old.log"))?;
     }
 
-    Ok(path)
+    Ok(())
 }

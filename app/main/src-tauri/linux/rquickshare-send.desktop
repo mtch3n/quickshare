@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Service
+MimeType=application/octet-stream;
+Actions=send;
+X-KDE-Priority=TopLevel
+
+[Desktop Action send]
+Name=Send with Quick Share
+Icon=rquickshare
+Exec=@EXEC@ --send %F

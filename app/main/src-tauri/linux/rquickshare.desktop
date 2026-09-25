@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=RQuickShare
+GenericName=Quick Share
+Comment=Send and receive files with nearby Android devices
+Exec={{exec}} %F
+Icon={{icon}}
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=nearby;share;quickshare;android;send;
+StartupWMClass=rquickshare
+StartupNotify=true

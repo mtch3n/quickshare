@@ -1,36 +1,28 @@
-#![cfg_attr(
-    all(not(debug_assertions), target_os = "windows"),
-    windows_subsystem = "windows"
-)]
-
 #[macro_use]
 extern crate log;
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rqs_lib::channel::{ChannelDirection, ChannelMessage};
-use rqs_lib::{EndpointInfo, SendInfo, State, Visibility, RQS};
-use store::get_startminimized;
-#[cfg(target_os = "macos")]
-use tauri::image::Image;
-use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder},
-    tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, Window, WindowEvent,
-};
+use rqs_lib::{EndpointInfo, RQS, SendInfo, State, Visibility};
+use tauri::{AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::logger::set_up_logging;
 use crate::notification::{send_request_notification, send_temporarily_notification};
-use crate::store::{
-    get_download_path, get_port, get_realclose, get_visibility, init_default, set_visibility,
-};
+use crate::tray::TrayHandle;
 
-mod cmds;
+mod commands;
+mod integrations;
 mod logger;
 mod notification;
 mod store;
+mod tray;
+
+/// Passed by the autostart entry so the app starts in the tray.
+const HIDDEN_ARG: &str = "--hidden";
 
 pub struct AppState {
     pub message_sender: broadcast::Sender<ChannelMessage>,
@@ -41,106 +33,119 @@ pub struct AppState {
     pub rqs: Mutex<RQS>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    // Define tauri async runtime to be tokio
-    tauri::async_runtime::set(tokio::runtime::Handle::current());
+/// Files handed to us on the command line (file manager "Send with Quick Share")
+/// before the frontend was ready to receive them.
+#[derive(Default)]
+pub struct PendingFiles(pub Mutex<Vec<String>>);
 
-    // Build and run Tauri app
+fn main() -> Result<(), anyhow::Error> {
+    // WebKitGTK's DMA-BUF renderer shows a blank window on NVIDIA and some Mesa
+    // setups. This has to happen before any other thread exists.
+    // SAFETY: we are still single-threaded, nothing else reads the environment.
+    unsafe {
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        if Path::new("/sys/module/nvidia").exists()
+            && std::env::var_os("__NV_DISABLE_EXPLICIT_SYNC").is_none()
+        {
+            std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+        }
+    }
+
+    // Tauri drives its async work on our runtime, but the app itself must be
+    // built on the main thread outside of it: plugins block on the runtime
+    // while they initialize.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    tauri::async_runtime::set(runtime.handle().clone());
+
+    run()
+}
+
+fn run() -> Result<(), anyhow::Error> {
+    let args: Vec<String> = std::env::args().collect();
+    let start_hidden = args.iter().any(|a| a == HIDDEN_ARG);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let initial_files = files_from_args(&args, &cwd);
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            trace!("tauri_plugin_single_instance: instance already running");
+            let files = files_from_args(&argv, Path::new(&cwd));
+            if argv.iter().any(|a| a == HIDDEN_ARG) && files.is_empty() {
+                return;
+            }
+
+            open_main_window(app);
+            if !files.is_empty() {
+                let _ = app.emit("send_files", files);
+            }
+        }))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![HIDDEN_ARG]),
         ))
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            trace!("tauri_plugin_single_instance: instance already running");
-            open_main_window(app);
-        }))
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
+        .manage(PendingFiles(Mutex::new(initial_files)))
         .invoke_handler(tauri::generate_handler![
-            cmds::change_download_path,
-            cmds::change_visibility,
-            cmds::start_discovery,
-            cmds::stop_discovery,
-            cmds::get_hostname,
-            cmds::send_payload,
-            cmds::send_to_rs,
+            commands::get_settings,
+            commands::set_visibility,
+            commands::set_download_path,
+            commands::set_keep_running,
+            commands::set_file_manager_integration,
+            commands::start_discovery,
+            commands::stop_discovery,
+            commands::send_payload,
+            commands::transfer_action,
+            commands::take_pending_files,
         ])
-        .setup(|app| {
-            // Setting up logging inside file for the app
+        .setup(move |app| {
             set_up_logging(app.app_handle())?;
-
             debug!("Starting setup of RQuickShare app");
 
-            // Initialize default values for the store
-            init_default(app.app_handle());
+            // Keep the file manager entries pointing at the current executable,
+            // which moves when an AppImage is updated.
+            if integrations::installed(app.app_handle())
+                && let Err(e) = integrations::install(app.app_handle())
+            {
+                warn!("Couldn't refresh file manager integration: {e}");
+            }
 
-            // Initialize system Tray
-            let name = MenuItemBuilder::new("RQuickShare")
-                .enabled(false)
-                .build(app)?;
-            let show = MenuItemBuilder::with_id("show", "Show").build(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-            let menu = MenuBuilder::new(app)
-                .item(&name)
-                .separator()
-                .items(&[&show, &quit])
-                .build()?;
-
-            #[cfg(target_os = "macos")]
-            let icon = Image::from_bytes(include_bytes!("../icons/tray.png")).unwrap();
-            #[cfg(not(target_os = "macos"))]
-            let icon = app.default_window_icon().unwrap().clone();
-
-            let tray = TrayIconBuilder::new()
-                .icon(icon)
-                .menu(&menu)
-                .on_menu_event(move |app, event| match event.id().as_ref() {
-                    "show" => {
-                        trace!("tray_show");
-                        open_main_window(app);
-                    }
-                    "quit" => {
-                        trace!("tray_quit");
-                        kill_app(app.app_handle());
-                    }
-                    _ => (),
-                })
-                .build(app)?;
-
-            let _ = tray.set_icon_as_template(true);
-
-            // Fetch initial configuration values
-            let visibility = get_visibility(app.app_handle());
-            let port_number = get_port(app.app_handle());
-            let download_path = get_download_path(app.app_handle());
+            let visibility = store::visibility(app.app_handle());
+            let port_number = store::port(app.app_handle());
+            let download_path = store::download_path(app.app_handle());
 
             let app_handle = app.app_handle().clone();
-            // This is not optimal, but until I find a better way to init log
-            // (inside file and stdout) before starting the lib, I'll keep it as
-            // is. This allow me to get the whole log :)
-            tokio::task::block_in_place(|| {
-                tauri::async_runtime::block_on(async move {
-                    trace!("Beginning of RQS start");
-                    // Start the RQuickShare service
-                    let mut rqs = RQS::new(visibility, port_number, download_path);
-                    let (sender_file, ble_receiver) = rqs.run().await.unwrap();
+            // Block until the service is up so the logger is already in place
+            // and every command can rely on AppState being managed.
+            tauri::async_runtime::block_on(async move {
+                let mut rqs = RQS::new(visibility, port_number, download_path);
+                let (sender_file, ble_receiver) = rqs.run().await?;
 
-                    // Define state for tauri app
-                    app_handle.manage(AppState {
-                        message_sender: rqs.message_sender.clone(),
-                        dch_sender: broadcast::channel(10).0,
-                        visibility_sender: rqs.visibility_sender.clone(),
-                        sender_file,
-                        ble_receiver,
-                        rqs: Mutex::new(rqs),
-                    });
+                app_handle.manage(AppState {
+                    message_sender: rqs.message_sender.clone(),
+                    dch_sender: broadcast::channel(10).0,
+                    visibility_sender: rqs.visibility_sender.clone(),
+                    sender_file,
+                    ble_receiver,
+                    rqs: Mutex::new(rqs),
                 });
-            });
+                app_handle.manage(tray::spawn(&app_handle, visibility).await);
+
+                Ok::<_, anyhow::Error>(())
+            })?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                fix_wayland_titlebar(&window);
+                if start_hidden {
+                    let _ = window.hide();
+                }
+            }
 
             spawn_receiver_tasks(app.app_handle());
             Ok(())
@@ -148,52 +153,47 @@ async fn main() -> Result<(), anyhow::Error> {
         .on_window_event(handle_window_event)
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| match event {
-            tauri::RunEvent::Ready { .. } => {
-                trace!("RunEvent::Ready");
-                if get_startminimized(app_handle) {
-                    #[cfg(not(target_os = "macos"))]
-                    app_handle
-                        .get_webview_window("main")
-                        .unwrap()
-                        .hide()
-                        .unwrap();
-                    #[cfg(target_os = "macos")]
-                    app_handle.hide().unwrap();
-                }
-            }
-            tauri::RunEvent::ExitRequested { code, .. } => {
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { code, .. } = event {
                 trace!("RunEvent::ExitRequested");
                 if code != Some(-1) {
                     kill_app(app_handle);
                 }
             }
-            #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => {
-                trace!("RunEvent::Reopen");
-                open_main_window(app_handle);
-            }
-            _ => {}
         });
 
     info!("Application stopped");
     Ok(())
 }
 
+/// Regular files among the arguments, resolved against `cwd`. Accepts both
+/// `rquickshare --send FILE...` and plain `rquickshare FILE...` (desktop %F).
+fn files_from_args(args: &[String], cwd: &Path) -> Vec<String> {
+    args.iter()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .map(|a| cwd.join(a))
+        .filter(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
 fn spawn_receiver_tasks(app_handle: &AppHandle) {
     let capp_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let state: tauri::State<'_, AppState> = capp_handle.state();
+        let tray: tauri::State<'_, TrayHandle> = capp_handle.state();
         let mut receiver = state.message_sender.subscribe();
 
         loop {
-            let rinfo = receiver.recv().await;
-
-            match rinfo {
+            match receiver.recv().await {
                 Ok(info) => {
-                    if info.state.as_ref().unwrap_or(&State::Initial)
-                        == &State::WaitingForUserConsent
-                    {
+                    if info.direction == ChannelDirection::FrontToLib {
+                        continue;
+                    }
+
+                    let waiting = info.state == Some(State::WaitingForUserConsent);
+                    if waiting {
                         let name = info
                             .meta
                             .as_ref()
@@ -202,11 +202,17 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                             .unwrap_or_else(|| "Unknown".to_string());
                         send_request_notification(name, info.id.clone(), &capp_handle);
                     }
-                    rs2js_channelmessage(info, &capp_handle);
+                    if info.state.is_some() {
+                        tray.set_waiting(info.id.clone(), waiting).await;
+                    }
+
+                    trace!("rs2js_channelmessage: {info:?}");
+                    let _ = capp_handle.emit("rs2js_channelmessage", &info);
                 }
-                Err(e) => {
-                    error!("RecvError: message_sender: {e}");
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("message_sender: skipped {n} messages");
                 }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -217,13 +223,15 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
         let mut dch_receiver = state.dch_sender.subscribe();
 
         loop {
-            let rinfo = dch_receiver.recv().await;
-
-            match rinfo {
-                Ok(info) => rs2js_endpointinfo(info, &capp_handle),
-                Err(e) => {
-                    error!("RecvError: dch_sender: {e}");
+            match dch_receiver.recv().await {
+                Ok(info) => {
+                    trace!("rs2js_endpointinfo: {info:?}");
+                    let _ = capp_handle.emit("rs2js_endpointinfo", &info);
                 }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("dch_sender: skipped {n} messages");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -231,20 +239,14 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
     let capp_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let state: tauri::State<'_, AppState> = capp_handle.state();
+        let tray: tauri::State<'_, TrayHandle> = capp_handle.state();
         let mut visibility_receiver = state.visibility_sender.lock().unwrap().subscribe();
 
-        loop {
-            let rinfo = visibility_receiver.changed().await;
-
-            match rinfo {
-                Ok(_) => {
-                    let v = visibility_receiver.borrow_and_update();
-                    let _ = set_visibility(&capp_handle, *v);
-                }
-                Err(e) => {
-                    error!("RecvError: visibility_receiver: {e}");
-                }
-            }
+        while visibility_receiver.changed().await.is_ok() {
+            let v = *visibility_receiver.borrow_and_update();
+            store::set_visibility(&capp_handle, v);
+            let _ = capp_handle.emit("visibility_updated", v);
+            tray.set_visibility(v).await;
         }
     });
 
@@ -252,77 +254,81 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state: tauri::State<'_, AppState> = capp_handle.state();
         let mut ble_receiver = state.ble_receiver.resubscribe();
-        let mut last_sent = std::time::Instant::now() - std::time::Duration::from_secs(120);
+        let mut last_sent: Option<std::time::Instant> = None;
 
         loop {
-            let rinfo = ble_receiver.recv().await;
-
-            match rinfo {
+            match ble_receiver.recv().await {
                 Ok(_) => {
-                    let v = get_visibility(&capp_handle);
+                    let v = store::visibility(&capp_handle);
                     trace!("Tauri: ble received: {:?}", v);
 
                     if v == Visibility::Invisible
-                        && last_sent.elapsed() >= std::time::Duration::from_secs(120)
+                        && last_sent.is_none_or(|t| t.elapsed().as_secs() >= 120)
                     {
                         send_temporarily_notification(&capp_handle);
-                        last_sent = std::time::Instant::now();
+                        last_sent = Some(std::time::Instant::now());
                     }
                 }
-                Err(e) => {
-                    error!("RecvError: ble_receiver: {e}");
-                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 }
 
 fn handle_window_event(w: &Window, event: &WindowEvent) {
-    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-        if get_realclose(w.app_handle()) {
+    if let WindowEvent::CloseRequested { api, .. } = event {
+        if !store::keep_running(w.app_handle()) {
             trace!("handle_window_event: real close");
             return;
         }
 
         trace!("handle_window_event: prevent close");
-        w.hide().unwrap();
+        let _ = w.hide();
         api.prevent_close();
     }
 }
 
-fn rs2js_channelmessage(message: ChannelMessage, manager: &AppHandle) {
-    if message.direction == ChannelDirection::FrontToLib {
-        return;
+pub fn open_main_window(app_handle: &AppHandle) {
+    match app_handle.get_webview_window("main") {
+        Some(window) => {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        None => warn!("open_main_window: no main window found"),
     }
-
-    info!("rs2js_channelmessage: {:?}", &message);
-    manager.emit("rs2js_channelmessage", &message).unwrap();
 }
 
-fn rs2js_endpointinfo(message: EndpointInfo, manager: &AppHandle) {
-    info!("rs2js_endpointinfo: {:?}", &message);
-    manager.emit("rs2js_endpointinfo", &message).unwrap();
-}
-
-fn open_main_window(app_handle: &AppHandle) {
-    if let Some(webview_window) = app_handle.get_webview_window("main") {
-        let _ = webview_window.show();
-        let _ = webview_window.set_focus();
-        return;
-    }
-
-    warn!("open_main_window: no main window found");
-}
-
-fn kill_app(app_handle: &AppHandle) {
+pub fn kill_app(app_handle: &AppHandle) {
     let state: tauri::State<'_, AppState> = app_handle.state();
 
     tokio::task::block_in_place(|| {
         #[allow(clippy::await_holding_lock)]
         tauri::async_runtime::block_on(async move {
-            let _ = state.rqs.lock().unwrap().stop().await;
+            state.rqs.lock().unwrap().stop().await;
         });
     });
 
     app_handle.exit(-1);
+}
+
+/// Makes the titlebar buttons clickable under Wayland.
+///
+/// On Wayland tao (up to 0.35) wraps its client-side header bar in a GtkEventBox
+/// with `above-child` set, so the box swallows every click and the close button
+/// does nothing once the window has been hidden and shown again (#422).
+/// Remove this and the `gtk` dependency once Tauri ships tao 0.36+.
+fn fix_wayland_titlebar(window: &tauri::WebviewWindow) {
+    use gtk::prelude::*;
+
+    let Ok(gtk_window) = window.gtk_window() else {
+        return;
+    };
+
+    if let Some(titlebar) = gtk_window.titlebar()
+        && let Ok(event_box) = titlebar.downcast::<gtk::EventBox>()
+    {
+        event_box.set_above_child(false);
+    }
 }
