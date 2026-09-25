@@ -850,7 +850,25 @@ impl InboundRequest {
             for file in &introduction.file_metadata {
                 let name = sanitize_file_name(file.name())
                     .unwrap_or_else(|| format!("file_{}", file.payload_id()));
-                let dest = get_download_dir().join(&name);
+
+                let mut dest = get_download_dir();
+
+                // Handle parent_folder if present
+                let parent_folder = file.parent_folder();
+                if !parent_folder.is_empty() {
+                    // Split by '/' and sanitize each component
+                    for component in parent_folder.split('/') {
+                        if !component.is_empty()
+                            && component != "."
+                            && component != ".."
+                            && let Some(sanitized) = sanitize_file_name(component)
+                        {
+                            dest.push(sanitized);
+                        }
+                    }
+                }
+
+                dest.push(&name);
 
                 let info = InternalFileInfo {
                     payload_id: file.payload_id(),

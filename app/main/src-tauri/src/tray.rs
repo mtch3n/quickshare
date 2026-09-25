@@ -8,6 +8,7 @@ use ksni::menu::{CheckmarkItem, StandardItem};
 use ksni::{Icon, MenuItem, Status, ToolTip, TrayMethods};
 use rqs_lib::Visibility;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::{AppState, kill_app, open_main_window};
 
@@ -131,6 +132,22 @@ impl ksni::Tray for Tray {
                 activate: Box::new(|t: &mut Self| {
                     open_main_window(&t.app);
                     let _ = t.app.emit("pick_files", ());
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Send clipboard".into(),
+                activate: Box::new(|t: &mut Self| {
+                    let app = t.app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Ok(text) = app.clipboard().read_text().await {
+                            if !text.is_empty() {
+                                open_main_window(&app);
+                                let _ = app.emit("send_text", text);
+                            }
+                        }
+                    });
                 }),
                 ..Default::default()
             }

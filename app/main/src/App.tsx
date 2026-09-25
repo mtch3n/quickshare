@@ -4,6 +4,8 @@ import { open } from "@tauri-apps/plugin-dialog"
 import { openPath } from "@tauri-apps/plugin-opener"
 import { UploadIcon } from "lucide-react"
 
+import type { OutboundPayload } from "@bindings/OutboundPayload"
+
 import { IncomingDialog } from "@/components/incoming-dialog"
 import { toast } from "@/components/ui/toast"
 import { useQuickShare } from "@/hooks/quick-share"
@@ -17,14 +19,29 @@ type Page = "home" | "send" | "settings"
 
 export function App() {
   const [page, setPage] = React.useState<Page>("home")
-  const [files, setFiles] = React.useState<string[]>([])
+  const [payload, setPayload] = React.useState<OutboundPayload | null>(null)
   const [dragging, setDragging] = React.useState(false)
 
-  const addFiles = React.useCallback((paths: string[]) => {
-    if (paths.length === 0) return
-    setFiles((current) => [...new Set([...current, ...paths])])
+  const startSending = React.useCallback((newPayload: OutboundPayload) => {
+    setPayload(newPayload)
     setPage("send")
   }, [])
+
+  const addFiles = React.useCallback(
+    (paths: string[]) => {
+      if (paths.length === 0) return
+      startSending({ Files: paths })
+    },
+    [startSending]
+  )
+
+  const sendText = React.useCallback(
+    (text: string) => {
+      if (text.length === 0) return
+      startSending({ Text: text })
+    },
+    [startSending]
+  )
 
   const pickFiles = React.useCallback(async () => {
     const picked = await open({ multiple: true, title: "Choose files to send" })
@@ -37,6 +54,7 @@ export function App() {
 
     const unlisten = [
       on("send_files", addFiles),
+      on("send_text", sendText),
       on("pick_files", pickFiles),
       getCurrentWebview().onDragDropEvent(({ payload }) => {
         setDragging(payload.type === "enter" || payload.type === "over")
@@ -45,31 +63,43 @@ export function App() {
     ]
 
     return () => unlisten.forEach((p) => p.then((f) => f()))
-  }, [addFiles, pickFiles])
+  }, [addFiles, sendText, pickFiles])
 
   useReceivedToasts()
 
   const leaveSend = () => {
-    setFiles([])
+    setPayload(null)
     setPage("home")
   }
+
+  const handleAddFiles = React.useCallback(async () => {
+    const picked = await open({
+      multiple: true,
+      title: "Choose files or folders to send",
+      directory: false,
+    })
+    if (picked) addFiles(picked)
+  }, [addFiles])
 
   return (
     <>
       {page === "home" && (
         <HomePage
-          onPickFiles={pickFiles}
+          onPickFiles={handleAddFiles}
+          onSendText={sendText}
           onOpenSettings={() => setPage("settings")}
         />
       )}
-      {page === "send" && (
+      {page === "send" && payload && (
         <SendPage
-          files={files}
-          onAddFiles={pickFiles}
+          payload={payload}
+          onAddFiles={handleAddFiles}
           onRemoveFile={(path) => {
-            const rest = files.filter((f) => f !== path)
-            if (rest.length === 0) leaveSend()
-            else setFiles(rest)
+            if ("Files" in payload) {
+              const rest = payload.Files.filter((f) => f !== path)
+              if (rest.length === 0) leaveSend()
+              else setPayload({ Files: rest })
+            }
           }}
           onBack={leaveSend}
         />

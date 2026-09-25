@@ -173,7 +173,7 @@ fn files_from_args(args: &[String], cwd: &Path) -> Vec<String> {
         .skip(1)
         .filter(|a| !a.starts_with("--"))
         .map(|a| cwd.join(a))
-        .filter(|p| p.is_file())
+        .filter(|p| p.is_file() || p.is_dir())
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
 }

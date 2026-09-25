@@ -3,12 +3,14 @@ import {
   ArrowLeftIcon,
   CheckIcon,
   FileIcon,
+  LinkIcon,
   PlusIcon,
   RotateCwIcon,
   XIcon,
 } from "lucide-react"
 
 import type { EndpointInfo } from "@bindings/EndpointInfo"
+import type { OutboundPayload } from "@bindings/OutboundPayload"
 
 import { DeviceIcon } from "@/components/device-icon"
 import { Button } from "@/components/ui/button"
@@ -37,17 +39,19 @@ import { fileName, percent, plural } from "@/lib/format"
 import { api } from "@/lib/tauri"
 
 export function SendPage({
-  files,
+  payload,
   onAddFiles,
   onRemoveFile,
   onBack,
 }: {
-  files: string[]
+  payload: OutboundPayload
   onAddFiles: () => void
   onRemoveFile: (path: string) => void
   onBack: () => void
 }) {
   const { endpoints, clearEndpoints } = useQuickShare()
+  const isText = "Text" in payload
+  const files = isText ? [] : payload.Files
 
   React.useEffect(() => {
     api.startDiscovery()
@@ -65,38 +69,58 @@ export function SendPage({
           <ArrowLeftIcon />
         </Button>
         <h1 className="font-heading text-base font-semibold">
-          Send {plural(files.length, "file")}
+          {isText ? "Send text" : `Send ${plural(files.length, "file")}`}
         </h1>
       </header>
 
-      <ItemGroup role="list" className="gap-1">
-        {files.map((path) => (
-          <Item key={path} size="xs" variant="muted" role="listitem">
-            <ItemMedia variant="icon">
+      {isText ? (
+        <Item size="sm" variant="muted" role="listitem">
+          <ItemMedia variant="icon">
+            {payload.Text.startsWith("http://") ||
+            payload.Text.startsWith("https://") ? (
+              <LinkIcon />
+            ) : (
               <FileIcon />
-            </ItemMedia>
-            <ItemContent className="min-w-0">
-              <ItemTitle className="w-full truncate">
-                {fileName(path)}
-              </ItemTitle>
-            </ItemContent>
-            <ItemActions>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`Remove ${fileName(path)}`}
-                onClick={() => onRemoveFile(path)}
-              >
-                <XIcon />
-              </Button>
-            </ItemActions>
-          </Item>
-        ))}
-      </ItemGroup>
-      <Button variant="outline" className="self-start" onClick={onAddFiles}>
-        <PlusIcon data-icon="inline-start" />
-        Add files
-      </Button>
+            )}
+          </ItemMedia>
+          <ItemContent className="min-w-0">
+            <ItemTitle className="line-clamp-2 w-full">
+              {payload.Text.split("\n")[0]}
+            </ItemTitle>
+          </ItemContent>
+        </Item>
+      ) : (
+        <>
+          <ItemGroup role="list" className="gap-1">
+            {files.map((path) => (
+              <Item key={path} size="xs" variant="muted" role="listitem">
+                <ItemMedia variant="icon">
+                  <FileIcon />
+                </ItemMedia>
+                <ItemContent className="min-w-0">
+                  <ItemTitle className="w-full truncate">
+                    {fileName(path)}
+                  </ItemTitle>
+                </ItemContent>
+                <ItemActions>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Remove ${fileName(path)}`}
+                    onClick={() => onRemoveFile(path)}
+                  >
+                    <XIcon />
+                  </Button>
+                </ItemActions>
+              </Item>
+            ))}
+          </ItemGroup>
+          <Button variant="outline" className="self-start" onClick={onAddFiles}>
+            <PlusIcon data-icon="inline-start" />
+            Add files
+          </Button>
+        </>
+      )}
 
       <Separator />
 
@@ -125,7 +149,11 @@ export function SendPage({
         ) : (
           <ItemGroup role="list">
             {endpoints.map((endpoint) => (
-              <DeviceRow key={endpoint.id} endpoint={endpoint} files={files} />
+              <DeviceRow
+                key={endpoint.id}
+                endpoint={endpoint}
+                payload={payload}
+              />
             ))}
           </ItemGroup>
         )}
@@ -136,10 +164,10 @@ export function SendPage({
 
 function DeviceRow({
   endpoint,
-  files,
+  payload,
 }: {
   endpoint: EndpointInfo
-  files: string[]
+  payload: OutboundPayload
 }) {
   const { transfers, dismiss } = useQuickShare()
   const [requested, setRequested] = React.useState(false)
@@ -148,8 +176,11 @@ function DeviceRow({
     : undefined
   const busy = requested && (!transfer || !isTerminal(transfer.state))
 
+  const canSend =
+    "Files" in payload ? payload.Files.length > 0 : payload.Text.length > 0
+
   const send = () => {
-    if (!endpoint.ip || !endpoint.port || files.length === 0) return
+    if (!endpoint.ip || !endpoint.port || !canSend) return
     // Forget the previous attempt so the row shows this one.
     dismiss(endpoint.id)
     setRequested(true)
@@ -157,7 +188,7 @@ function DeviceRow({
       id: endpoint.id,
       name: endpoint.name ?? "Unknown device",
       addr: `${endpoint.ip}:${endpoint.port}`,
-      ob: { Files: files },
+      ob: payload,
     })
   }
 
@@ -189,7 +220,7 @@ function DeviceRow({
         ) : transfer?.state === "Finished" ? (
           <CheckIcon className="text-primary" aria-label="Sent" />
         ) : (
-          <Button size="sm" disabled={files.length === 0} onClick={send}>
+          <Button size="sm" disabled={!canSend} onClick={send}>
             {transfer ? <RotateCwIcon data-icon="inline-start" /> : null}
             {transfer ? "Retry" : "Send"}
           </Button>

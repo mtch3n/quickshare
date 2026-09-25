@@ -43,6 +43,9 @@ message FileMetadata {
 
   // A uuid for the attachment. Should be unique across all attachments.
   optional int64 id = 6;
+
+  // The parent folder.
+  optional string parent_folder = 7;
 }
 
 // NEXT_ID=5
