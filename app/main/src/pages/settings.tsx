@@ -19,6 +19,8 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { toast } from "@/components/ui/toast"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { ReceiveSettings } from "@/components/receive-settings"
+import { TrustedDevices } from "@/components/trusted-devices"
 import { useQuickShare } from "@/hooks/quick-share"
 import { api } from "@/lib/tauri"
 
@@ -133,7 +135,7 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
           <FieldContent>
             <FieldLabel htmlFor="integration">File manager menu</FieldLabel>
             <FieldDescription>
-              Adds “Send with Quick Share” to Files, Dolphin and Nemo. Files
+              Adds "Send with Quick Share" to Files, Dolphin and Nemo. Files
               needs the nautilus-python package.
             </FieldDescription>
           </FieldContent>
@@ -143,6 +145,14 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
             onCheckedChange={toggleIntegration}
           />
         </Field>
+
+        <FieldSeparator />
+
+        <ReceiveSettings />
+
+        <FieldSeparator />
+
+        <TrustedDevices />
 
         <FieldSeparator />
 
