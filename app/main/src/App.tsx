@@ -2,15 +2,17 @@ import * as React from "react"
 import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { open } from "@tauri-apps/plugin-dialog"
 import { openPath } from "@tauri-apps/plugin-opener"
-import { UploadIcon } from "lucide-react"
+import { SettingsIcon, UploadIcon } from "lucide-react"
 
 import type { OutboundPayload } from "@bindings/OutboundPayload"
 
 import { IncomingDialog } from "@/components/incoming-dialog"
+import { Button } from "@/components/ui/button"
 import { TitleBar } from "@/components/title-bar"
 import { toast } from "@/components/ui/toast"
 import { useQuickShare } from "@/hooks/quick-share"
 import { api, on } from "@/lib/tauri"
+import { plural } from "@/lib/format"
 import { describeContent } from "@/lib/transfer"
 import { HomePage } from "@/pages/home"
 import { SendPage } from "@/pages/send"
@@ -84,14 +86,28 @@ export function App() {
 
   return (
     <div className="flex h-svh flex-col">
-      <TitleBar />
+      <TitleBar
+        {...(page === "home"
+          ? {
+              title: "RQuickShare",
+              actions: (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Settings"
+                  onClick={() => setPage("settings")}
+                >
+                  <SettingsIcon />
+                </Button>
+              ),
+            }
+          : page === "send"
+            ? { title: sendTitle(payload), onBack: leaveSend }
+            : { title: "Settings", onBack: () => setPage("home") })}
+      />
       <main className="min-h-0 flex-1 overflow-y-auto">
         {page === "home" && (
-          <HomePage
-            onPickFiles={handleAddFiles}
-            onSendText={sendText}
-            onOpenSettings={() => setPage("settings")}
-          />
+          <HomePage onPickFiles={handleAddFiles} onSendText={sendText} />
         )}
         {page === "send" && payload && (
           <SendPage
@@ -104,10 +120,9 @@ export function App() {
                 else setPayload({ Files: rest })
               }
             }}
-            onBack={leaveSend}
           />
         )}
-        {page === "settings" && <SettingsPage onBack={() => setPage("home")} />}
+        {page === "settings" && <SettingsPage />}
       </main>
 
       <IncomingDialog />
@@ -120,6 +135,11 @@ export function App() {
       )}
     </div>
   )
+}
+
+function sendTitle(payload: OutboundPayload | null) {
+  if (!payload || "Text" in payload) return "Send text"
+  return `Send ${plural(payload.Files.length, "file")}`
 }
 
 /** Toasts once per finished incoming transfer. */

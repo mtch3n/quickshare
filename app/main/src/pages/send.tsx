@@ -1,6 +1,5 @@
 import * as React from "react"
 import {
-  ArrowLeftIcon,
   CheckIcon,
   FileIcon,
   LinkIcon,
@@ -35,19 +34,17 @@ import { Progress } from "@/components/ui/progress"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { type Transfer, isTerminal, useQuickShare } from "@/hooks/quick-share"
-import { fileName, percent, plural } from "@/lib/format"
+import { fileName, percent } from "@/lib/format"
 import { api } from "@/lib/tauri"
 
 export function SendPage({
   payload,
   onAddFiles,
   onRemoveFile,
-  onBack,
 }: {
   payload: OutboundPayload
   onAddFiles: () => void
   onRemoveFile: (path: string) => void
-  onBack: () => void
 }) {
   const { endpoints, clearEndpoints } = useQuickShare()
   const isText = "Text" in payload
@@ -64,15 +61,6 @@ export function SendPage({
 
   return (
     <div className="flex min-h-full flex-col gap-4 px-4 pb-4">
-      <header className="flex items-center gap-2">
-        <Button variant="ghost" size="icon" aria-label="Back" onClick={onBack}>
-          <ArrowLeftIcon />
-        </Button>
-        <h1 className="font-heading text-base font-semibold">
-          {isText ? "Send text" : `Send ${plural(files.length, "file")}`}
-        </h1>
-      </header>
-
       {isText ? (
         <Item size="sm" variant="muted" role="listitem">
           <ItemMedia variant="icon">

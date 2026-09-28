@@ -3,7 +3,7 @@ import { getVersion } from "@tauri-apps/api/app"
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart"
 import { open } from "@tauri-apps/plugin-dialog"
 import { openUrl } from "@tauri-apps/plugin-opener"
-import { ArrowLeftIcon, MonitorIcon, MoonIcon, SunIcon } from "lucide-react"
+import { MonitorIcon, MoonIcon, SunIcon } from "lucide-react"
 
 import { type Theme, useTheme } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
@@ -32,7 +32,7 @@ function reportError(title: string) {
     toast.add({ title, description: String(e), type: "error" })
 }
 
-export function SettingsPage({ onBack }: { onBack: () => void }) {
+export function SettingsPage() {
   const { settings, updateSettings } = useQuickShare()
   const { theme, setTheme } = useTheme()
   const [autostart, setAutostart] = React.useState(false)
@@ -71,13 +71,6 @@ export function SettingsPage({ onBack }: { onBack: () => void }) {
 
   return (
     <div className="flex min-h-full flex-col gap-4 px-4 pb-4">
-      <header className="flex items-center gap-2">
-        <Button variant="ghost" size="icon" aria-label="Back" onClick={onBack}>
-          <ArrowLeftIcon />
-        </Button>
-        <h1 className="font-heading text-base font-semibold">Settings</h1>
-      </header>
-
       <FieldGroup>
         <DeviceNameField />
 

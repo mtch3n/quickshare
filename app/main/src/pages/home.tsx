@@ -1,5 +1,5 @@
 import * as React from "react"
-import { SendIcon, SettingsIcon, UploadIcon } from "lucide-react"
+import { SendIcon, UploadIcon } from "lucide-react"
 
 import { TransferItem } from "@/components/transfer-item"
 import { Button } from "@/components/ui/button"
@@ -18,11 +18,9 @@ const VISIBILITY_LABEL = {
 export function HomePage({
   onPickFiles,
   onSendText,
-  onOpenSettings,
 }: {
   onPickFiles: () => void
   onSendText: (text: string) => void
-  onOpenSettings: () => void
 }) {
   const { settings, transfers } = useQuickShare()
   const shown = transfers.filter(isShown)
@@ -38,12 +36,9 @@ export function HomePage({
 
   return (
     <div className="flex h-full flex-col gap-4 px-4 pb-4">
-      <header className="flex items-center gap-3">
-        <img src="/icon.svg" alt="" className="size-9" />
+      <header className="flex items-center gap-3 px-1">
         <div className="flex min-w-0 flex-1 flex-col">
-          <h1 className="truncate font-heading text-base font-semibold">
-            {settings?.deviceName}
-          </h1>
+          <p className="truncate font-medium">{settings?.deviceName}</p>
           <p className="text-sm text-muted-foreground">
             {VISIBILITY_LABEL[visibility ?? "Visible"]}
           </p>
@@ -56,14 +51,6 @@ export function HomePage({
             api.setVisibility(checked ? "Visible" : "Invisible")
           }
         />
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Settings"
-          onClick={onOpenSettings}
-        >
-          <SettingsIcon />
-        </Button>
       </header>
 
       {shown.length > 0 && (
