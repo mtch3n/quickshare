@@ -7,6 +7,7 @@ import { UploadIcon } from "lucide-react"
 import type { OutboundPayload } from "@bindings/OutboundPayload"
 
 import { IncomingDialog } from "@/components/incoming-dialog"
+import { TitleBar } from "@/components/title-bar"
 import { toast } from "@/components/ui/toast"
 import { useQuickShare } from "@/hooks/quick-share"
 import { api, on } from "@/lib/tauri"
@@ -82,29 +83,32 @@ export function App() {
   }, [addFiles])
 
   return (
-    <>
-      {page === "home" && (
-        <HomePage
-          onPickFiles={handleAddFiles}
-          onSendText={sendText}
-          onOpenSettings={() => setPage("settings")}
-        />
-      )}
-      {page === "send" && payload && (
-        <SendPage
-          payload={payload}
-          onAddFiles={handleAddFiles}
-          onRemoveFile={(path) => {
-            if ("Files" in payload) {
-              const rest = payload.Files.filter((f) => f !== path)
-              if (rest.length === 0) leaveSend()
-              else setPayload({ Files: rest })
-            }
-          }}
-          onBack={leaveSend}
-        />
-      )}
-      {page === "settings" && <SettingsPage onBack={() => setPage("home")} />}
+    <div className="flex h-svh flex-col">
+      <TitleBar />
+      <main className="min-h-0 flex-1 overflow-y-auto">
+        {page === "home" && (
+          <HomePage
+            onPickFiles={handleAddFiles}
+            onSendText={sendText}
+            onOpenSettings={() => setPage("settings")}
+          />
+        )}
+        {page === "send" && payload && (
+          <SendPage
+            payload={payload}
+            onAddFiles={handleAddFiles}
+            onRemoveFile={(path) => {
+              if ("Files" in payload) {
+                const rest = payload.Files.filter((f) => f !== path)
+                if (rest.length === 0) leaveSend()
+                else setPayload({ Files: rest })
+              }
+            }}
+            onBack={leaveSend}
+          />
+        )}
+        {page === "settings" && <SettingsPage onBack={() => setPage("home")} />}
+      </main>
 
       <IncomingDialog />
 
@@ -114,7 +118,7 @@ export function App() {
           <p className="font-medium">Drop to send</p>
         </div>
       )}
-    </>
+    </div>
   )
 }
 

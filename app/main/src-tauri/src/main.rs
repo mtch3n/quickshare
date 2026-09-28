@@ -152,11 +152,8 @@ fn run() -> Result<(), anyhow::Error> {
                 Ok::<_, anyhow::Error>(())
             })?;
 
-            if let Some(window) = app.get_webview_window("main") {
-                fix_wayland_titlebar(&window);
-                if start_hidden {
-                    let _ = window.hide();
-                }
+            if start_hidden && let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
             }
 
             spawn_receiver_tasks(app.app_handle());
@@ -423,26 +420,6 @@ pub fn kill_app(app_handle: &AppHandle) {
     });
 
     app_handle.exit(-1);
-}
-
-/// Makes the titlebar buttons clickable under Wayland.
-///
-/// On Wayland tao (up to 0.35) wraps its client-side header bar in a GtkEventBox
-/// with `above-child` set, so the box swallows every click and the close button
-/// does nothing once the window has been hidden and shown again (#422).
-/// Remove this and the `gtk` dependency once Tauri ships tao 0.36+.
-fn fix_wayland_titlebar(window: &tauri::WebviewWindow) {
-    use gtk::prelude::*;
-
-    let Ok(gtk_window) = window.gtk_window() else {
-        return;
-    };
-
-    if let Some(titlebar) = gtk_window.titlebar()
-        && let Ok(event_box) = titlebar.downcast::<gtk::EventBox>()
-    {
-        event_box.set_above_child(false);
-    }
 }
 
 /// Links from peers are only opened if they are web links: a `file:` or custom

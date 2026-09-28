@@ -8,13 +8,12 @@ repository.workspace = true
 default-run = "rquickshare"
 
 [build-dependencies]
-tauri-build = "2.6"
+tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
 anyhow.workspace = true
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 fern = { version = "0.7", features = ["colored"] }
-gtk = "0.18"
 humantime = "2"
 ksni = "0.3"
 log.workspace = true

@@ -63,7 +63,7 @@ export function SendPage({
   }, [])
 
   return (
-    <div className="flex min-h-svh flex-col gap-4 p-4">
+    <div className="flex min-h-full flex-col gap-4 px-4 pb-4">
       <header className="flex items-center gap-2">
         <Button variant="ghost" size="icon" aria-label="Back" onClick={onBack}>
           <ArrowLeftIcon />

@@ -37,7 +37,7 @@ export function HomePage({
   }
 
   return (
-    <div className="flex h-svh flex-col gap-4 p-4">
+    <div className="flex h-full flex-col gap-4 px-4 pb-4">
       <header className="flex items-center gap-3">
         <img src="/icon.svg" alt="" className="size-9" />
         <div className="flex min-w-0 flex-1 flex-col">

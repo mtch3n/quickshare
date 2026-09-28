@@ -3841,7 +3841,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "fern",
- "gtk",
  "humantime",
  "ksni",
  "log",
