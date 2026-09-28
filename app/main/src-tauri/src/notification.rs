@@ -16,6 +16,17 @@ fn base() -> Notification {
     n
 }
 
+/// Shows `notification` and hands its clicked action to `on_action`.
+///
+/// notify-rust talks to D-Bus through zbus' blocking API, which panics when it
+/// runs on a tokio worker thread, so all of it happens on a blocking thread.
+fn show(notification: Notification, on_action: impl FnOnce(&str) + Send + 'static) {
+    tokio::task::spawn_blocking(move || match notification.show() {
+        Ok(handle) => handle.wait_for_action(on_action),
+        Err(e) => error!("Couldn't show notification: {e}"),
+    });
+}
+
 /// Describes what a transfer carries, e.g. "photo.jpg", "4 files" or "a link".
 fn content_summary(files: Option<&[String]>, text_type: Option<&str>) -> String {
     match files {
@@ -44,56 +55,41 @@ pub fn send_request_notification(
         None => format!("Wants to send {content}"),
     };
 
-    let shown = base()
+    let mut notification = base();
+    notification
         .summary(&format!("Incoming from {name}"))
         .body(&body)
         .urgency(Urgency::Critical)
         .action("default", "Open")
         .action("accept", "Accept")
-        .action("reject", "Decline")
-        .show();
-
-    let n = match shown {
-        Ok(n) => n,
-        Err(e) => return error!("Couldn't show notification: {e}"),
-    };
+        .action("reject", "Decline");
 
     let app_handle = app_handle.clone();
-    // wait_for_action blocks until the notification is closed.
-    tokio::task::spawn_blocking(move || {
-        n.wait_for_action(|action| {
-            let action = match action {
-                "accept" => ChannelAction::AcceptTransfer,
-                "reject" => ChannelAction::RejectTransfer,
-                "default" => return open_main_window(&app_handle),
-                _ => return,
-            };
+    show(notification, move |action| {
+        let action = match action {
+            "accept" => ChannelAction::AcceptTransfer,
+            "reject" => ChannelAction::RejectTransfer,
+            "default" => return open_main_window(&app_handle),
+            _ => return,
+        };
 
-            commands::send_action(&app_handle.state::<AppState>(), id, action);
-        });
+        commands::send_action(&app_handle.state::<AppState>(), id, action);
     });
 }
 
 pub fn send_temporarily_notification(app_handle: &AppHandle) {
-    let shown = base()
+    let mut notification = base();
+    notification
         .body("A nearby device is sharing, but you're hidden")
         .action("visible", "Be visible for 1 minute")
         .action("ignore", "Ignore")
-        .id(1919)
-        .show();
-
-    let n = match shown {
-        Ok(n) => n,
-        Err(e) => return error!("Couldn't show notification: {e}"),
-    };
+        .id(1919);
 
     let app_handle = app_handle.clone();
-    tokio::task::spawn_blocking(move || {
-        n.wait_for_action(|action| {
-            if action == "visible" {
-                commands::set_visibility(Visibility::Temporarily, app_handle.state());
-            }
-        });
+    show(notification, move |action| {
+        if action == "visible" {
+            commands::set_visibility(Visibility::Temporarily, app_handle.state());
+        }
     });
 }
 
@@ -110,67 +106,48 @@ pub fn send_received_notification(
     let has_url = text_type.as_deref() == Some("Url");
     let has_text = text_type.as_deref() == Some("Text");
 
-    let shown = if has_url {
-        base()
-            .summary(&format!("Received from {}", name))
-            .body(&body)
-            .action("default", "Open folder")
-            .action("open", "Open")
-            .show()
+    let mut notification = base();
+    notification
+        .summary(&format!("Received from {name}"))
+        .body(&body)
+        .action("default", "Open folder");
+    if has_url {
+        notification.action("open", "Open");
     } else if has_text {
-        base()
-            .summary(&format!("Received from {}", name))
-            .body(&body)
-            .action("default", "Open folder")
-            .action("copy", "Copy")
-            .show()
-    } else {
-        base()
-            .summary(&format!("Received from {}", name))
-            .body(&body)
-            .action("default", "Open folder")
-            .show()
-    };
-
-    let n = match shown {
-        Ok(n) => n,
-        Err(e) => return error!("Couldn't show received notification: {e}"),
-    };
+        notification.action("copy", "Copy");
+    }
 
     let app_handle = app_handle.clone();
-
-    tokio::task::spawn_blocking(move || {
-        n.wait_for_action(move |action| match action {
-            "default" => {
-                if let Some(dest) = &destination {
-                    let opener = app_handle.opener();
-                    if let Err(e) = opener.open_path(dest, None::<&str>) {
-                        error!("Couldn't open folder: {e}");
-                    } else {
-                        return;
-                    }
-                }
-                open_main_window(&app_handle);
-            }
-            "open" => {
-                if let Some(url) = &text_payload
-                    && crate::is_web_url(url)
-                {
-                    let opener = app_handle.opener();
-                    if let Err(e) = opener.open_url(url, None::<&str>) {
-                        error!("Couldn't open URL: {e}");
-                    }
+    show(notification, move |action| match action {
+        "default" => {
+            if let Some(dest) = &destination {
+                let opener = app_handle.opener();
+                if let Err(e) = opener.open_path(dest, None::<&str>) {
+                    error!("Couldn't open folder: {e}");
+                } else {
+                    return;
                 }
             }
-            "copy" => {
-                if let Some(text) = &text_payload {
-                    let clipboard = app_handle.clipboard();
-                    if let Err(e) = clipboard.write_text(text.clone()) {
-                        error!("Couldn't copy text: {e}");
-                    }
+            open_main_window(&app_handle);
+        }
+        "open" => {
+            if let Some(url) = &text_payload
+                && crate::is_web_url(url)
+            {
+                let opener = app_handle.opener();
+                if let Err(e) = opener.open_url(url, None::<&str>) {
+                    error!("Couldn't open URL: {e}");
                 }
             }
-            _ => {}
-        });
+        }
+        "copy" => {
+            if let Some(text) = &text_payload {
+                let clipboard = app_handle.clipboard();
+                if let Err(e) = clipboard.write_text(text.clone()) {
+                    error!("Couldn't copy text: {e}");
+                }
+            }
+        }
+        _ => {}
     });
 }

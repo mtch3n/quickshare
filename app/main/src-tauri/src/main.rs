@@ -234,8 +234,11 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                             continue;
                         }
 
-                        if notified_requests.insert(info.id.clone()) {
-                            open_main_window(&capp_handle);
+                        // The app always asks; the notification covers the
+                        // times nobody is looking at it.
+                        if notified_requests.insert(info.id.clone())
+                            && !main_window_focused(&capp_handle)
+                        {
                             let meta = info.meta.as_ref();
                             send_request_notification(
                                 name,
@@ -272,10 +275,8 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                                 warn!("Couldn't auto-copy text: {e}");
                             }
 
-                            // Show received notification if window is not visible
-                            if let Some(window) = capp_handle.get_webview_window("main")
-                                && !window.is_visible().unwrap_or(false)
-                            {
+                            // The app shows a toast; notify when nobody is looking at it.
+                            if !main_window_focused(&capp_handle) {
                                 let source_name = meta
                                     .source
                                     .as_ref()
@@ -403,6 +404,12 @@ pub fn open_main_window(app_handle: &AppHandle) {
         }
         None => warn!("open_main_window: no main window found"),
     }
+}
+
+fn main_window_focused(app_handle: &AppHandle) -> bool {
+    app_handle.get_webview_window("main").is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+    })
 }
 
 pub fn kill_app(app_handle: &AppHandle) {
