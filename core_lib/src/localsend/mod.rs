@@ -273,9 +273,10 @@ impl std::fmt::Debug for LocalSend {
 }
 
 impl LocalSend {
-    /// Starts the server and discovery on `tracker`. `data_dir` keeps the TLS
+    /// Starts the server on `port` and discovery on `tracker`. `data_dir` keeps the TLS
     /// certificate, whose hash is our fingerprint, across restarts.
     pub fn start(
+        port: u16,
         data_dir: Option<PathBuf>,
         device_name: watch::Receiver<String>,
         visibility: watch::Receiver<Visibility>,
@@ -293,7 +294,7 @@ impl LocalSend {
 
         let shared = Arc::new(Shared {
             fingerprint: identity.fingerprint,
-            port: PORT,
+            port,
             device_name,
             visibility,
             sender,

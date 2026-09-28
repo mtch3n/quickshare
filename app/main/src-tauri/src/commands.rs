@@ -18,6 +18,8 @@ pub struct Settings {
     keep_running: bool,
     desktop_integration: bool,
     trusted_devices: Vec<store::TrustedDevice>,
+    port: Option<u16>,
+    localsend_port: Option<u16>,
     auto_open_links: bool,
     auto_copy_text: bool,
 }
@@ -34,6 +36,8 @@ pub fn get_settings(app: AppHandle) -> Settings {
         keep_running: store::keep_running(&app),
         desktop_integration: integrations::installed(&app),
         trusted_devices: store::trusted_devices(&app),
+        port: store::port(&app),
+        localsend_port: store::localsend_port(&app),
         auto_open_links: store::auto_open_links(&app),
         auto_copy_text: store::auto_copy_text(&app),
     }
@@ -228,4 +232,27 @@ pub async fn check_update(app: AppHandle) -> Result<Option<crate::update::Update
     crate::update::check(&app.package_info().version)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Fixes the ports (`None`: automatic / default). They're bound at startup,
+/// so this takes effect when the app restarts.
+#[tauri::command]
+pub fn set_ports(
+    app: AppHandle,
+    port: Option<u16>,
+    localsend_port: Option<u16>,
+) -> Result<(), String> {
+    if port.is_some() && port == localsend_port {
+        return Err("Quick Share and LocalSend need different ports".into());
+    }
+    if [port, localsend_port]
+        .into_iter()
+        .flatten()
+        .any(|p| p < 1024)
+    {
+        return Err("Ports below 1024 need root; pick 1024 to 65535".into());
+    }
+    store::set_port(&app, port);
+    store::set_localsend_port(&app, localsend_port);
+    Ok(())
 }

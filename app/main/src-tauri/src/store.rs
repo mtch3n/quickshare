@@ -13,8 +13,9 @@ const VISIBILITY: &str = "visibility";
 const DOWNLOAD_PATH: &str = "download_path";
 const DEVICE_NAME: &str = "device_name";
 const KEEP_RUNNING: &str = "keep_running";
-/// Fixed TCP port, for firewalls. Only settable by editing the file.
+/// Fixed ports, for firewalls. Read at startup.
 const PORT: &str = "port";
+const LOCALSEND_PORT: &str = "localsend_port";
 /// Log level override. Only settable by editing the file.
 const LOG_LEVEL: &str = "debug_level";
 const TRUSTED_DEVICES: &str = "trusted_devices";
@@ -81,11 +82,39 @@ pub fn set_keep_running(app: &AppHandle, enabled: bool) {
     store(app).set(KEEP_RUNNING, enabled);
 }
 
-pub fn port(app: &AppHandle) -> Option<u32> {
+/// Quick Share's TCP port; any free one when unset.
+pub fn port(app: &AppHandle) -> Option<u16> {
+    get_port(app, PORT)
+}
+
+pub fn set_port(app: &AppHandle, port: Option<u16>) {
+    set_port_value(app, PORT, port);
+}
+
+/// LocalSend's HTTPS port; the protocol's default when unset.
+pub fn localsend_port(app: &AppHandle) -> Option<u16> {
+    get_port(app, LOCALSEND_PORT)
+}
+
+pub fn set_localsend_port(app: &AppHandle, port: Option<u16>) {
+    set_port_value(app, LOCALSEND_PORT, port);
+}
+
+fn get_port(app: &AppHandle, key: &str) -> Option<u16> {
     store(app)
-        .get(PORT)
+        .get(key)
         .and_then(|v| v.as_u64())
-        .and_then(|v| u32::try_from(v).ok())
+        .and_then(|v| u16::try_from(v).ok())
+        .filter(|&port| port != 0)
+}
+
+fn set_port_value(app: &AppHandle, key: &str, port: Option<u16>) {
+    match port {
+        Some(port) => store(app).set(key, port),
+        None => {
+            store(app).delete(key);
+        }
+    }
 }
 
 pub fn log_level(app: &AppHandle) -> Option<String> {

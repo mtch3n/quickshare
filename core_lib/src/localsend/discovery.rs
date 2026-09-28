@@ -17,6 +17,10 @@ const ANNOUNCE_DELAYS: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(3),
 ];
+/// How often we announce ourselves while the frontend is looking for devices.
+/// Peers that start later, or whose announcements we missed, hear one and
+/// register with us over HTTP, which multicast can't drop.
+const SEARCH_INTERVAL: Duration = Duration::from_secs(4);
 
 struct Multicast {
     socket: UdpSocket,
@@ -68,10 +72,17 @@ pub async fn run(shared: Arc<Shared>, ctk: CancellationToken) -> Result<(), anyh
     announce(&shared, &multicast);
 
     let mut buf = vec![0; 64 * 1024];
+    let mut search = tokio::time::interval(SEARCH_INTERVAL);
+    search.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = ctk.cancelled() => return Ok(()),
             _ = shared.announce.notified() => announce(&shared, &multicast),
+            _ = search.tick() => {
+                if shared.discovery.lock().unwrap().is_some() {
+                    multicast.send(&shared.info(Some(true))).await;
+                }
+            }
             received = multicast.socket.recv_from(&mut buf) => {
                 let (len, from) = received?;
                 let Ok(peer) = serde_json::from_slice::<DeviceInfo>(&buf[..len]) else {

@@ -34,6 +34,7 @@ import { Switch } from "@/components/ui/switch"
 import { toast } from "@/components/ui/toast"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { DeviceNameField } from "@/components/device-name-field"
+import { NetworkSettings } from "@/components/network-settings"
 import { ReceiveSettings } from "@/components/receive-settings"
 import { TrustedDevices } from "@/components/trusted-devices"
 import { useQuickShare } from "@/hooks/quick-share"
@@ -134,6 +135,13 @@ export function SettingsPage() {
         footer="LocalSend devices are recognised by their certificate. Quick Share ones only by name, so trust those on networks you trust."
       >
         <TrustedDevices />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Network"
+        footer="Fixed ports help with firewalls. Leave blank for the default; changes apply after a restart."
+      >
+        <NetworkSettings />
       </SettingsSection>
 
       <SettingsSection title="System">

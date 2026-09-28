@@ -78,7 +78,10 @@ pub struct RQS {
     // Only used to send the info "a nearby device is sharing"
     ble_sender: broadcast::Sender<()>,
 
-    port_number: Option<u32>,
+    /// Quick Share's TCP port; any free one when unset.
+    port_number: Option<u16>,
+    /// LocalSend's HTTPS port; its default when unset.
+    localsend_port: Option<u16>,
     /// Keeps the LocalSend certificate, and so our LocalSend identity.
     data_dir: Option<PathBuf>,
     localsend: Option<LocalSend>,
@@ -89,7 +92,8 @@ pub struct RQS {
 impl RQS {
     pub fn new(
         visibility: Visibility,
-        port_number: Option<u32>,
+        port_number: Option<u16>,
+        localsend_port: Option<u16>,
         download_path: Option<PathBuf>,
         device_name: Option<String>,
         data_dir: Option<PathBuf>,
@@ -118,6 +122,7 @@ impl RQS {
             device_name_receiver,
             ble_sender,
             port_number,
+            localsend_port,
             data_dir,
             localsend: None,
             message_sender,
@@ -159,6 +164,7 @@ impl RQS {
 
         // LocalSend is a nice to have too, e.g. when its port is taken.
         self.localsend = LocalSend::start(
+            self.localsend_port.unwrap_or(localsend::PORT),
             self.data_dir.clone(),
             self.device_name_receiver.clone(),
             self.visibility_receiver.clone(),
@@ -352,7 +358,14 @@ mod tests {
     #[test]
     fn device_name_falls_back_to_hostname() {
         let _download_dir = DOWNLOAD_DIR_TEST_LOCK.blocking_lock();
-        let rqs = RQS::new(Visibility::Visible, None, None, Some("Desk".into()), None);
+        let rqs = RQS::new(
+            Visibility::Visible,
+            None,
+            None,
+            None,
+            Some("Desk".into()),
+            None,
+        );
         assert_eq!(*rqs.device_name_receiver.borrow(), "Desk");
 
         rqs.set_device_name("  ".into());

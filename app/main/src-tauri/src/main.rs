@@ -130,6 +130,7 @@ fn run() -> Result<(), anyhow::Error> {
             commands::open_url,
             commands::open_path,
             commands::check_update,
+            commands::set_ports,
         ])
         .setup(move |app| {
             set_up_logging(app.app_handle())?;
@@ -145,6 +146,7 @@ fn run() -> Result<(), anyhow::Error> {
 
             let visibility = store::visibility(app.app_handle());
             let port_number = store::port(app.app_handle());
+            let localsend_port = store::localsend_port(app.app_handle());
             let download_path = store::download_path(app.app_handle());
             let device_name = store::device_name(app.app_handle());
 
@@ -156,6 +158,7 @@ fn run() -> Result<(), anyhow::Error> {
                 let mut rqs = RQS::new(
                     visibility,
                     port_number,
+                    localsend_port,
                     download_path,
                     device_name,
                     data_dir,

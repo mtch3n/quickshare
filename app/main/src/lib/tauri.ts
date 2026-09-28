@@ -21,6 +21,9 @@ export type Settings = {
   keepRunning: boolean
   desktopIntegration: boolean
   trustedDevices: TrustedDevice[]
+  /** Fixed ports; null means automatic (Quick Share) or 53317 (LocalSend). */
+  port: number | null
+  localsendPort: number | null
   autoOpenLinks: boolean
   autoCopyText: boolean
 }
@@ -71,6 +74,8 @@ export const api = {
   /** Through the desktop portal, so the default browser opens it. */
   openUrl: (url: string) => invoke<void>("open_url", { url }),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  setPorts: (port: number | null, localsendPort: number | null) =>
+    invoke<void>("set_ports", { port, localsendPort }),
   checkUpdate: () => invoke<Update | null>("check_update"),
   inspectFiles: (paths: string[]) =>
     invoke<FileSummary[]>("inspect_files", { paths }),
