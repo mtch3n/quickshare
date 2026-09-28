@@ -201,6 +201,18 @@ fn parse_socket_message(message: &[u8]) -> SocketMessage<'_> {
     }
 }
 
+/// Splits the handshake's byte stream into `[len(4)][frame]` units, keeping the
+/// length prefix: the phone expects it inside each socket message.
+fn frame_codec() -> LengthDelimitedCodec {
+    LengthDelimitedCodec::builder()
+        .length_field_length(4)
+        .big_endian()
+        // The length counts the frame only; add the prefix we keep.
+        .length_adjustment(4)
+        .num_skip(0)
+        .new_codec()
+}
+
 /// One phone's weave socket, bridged to an [`InboundRequest`].
 struct WeaveConnection {
     device: Address,
@@ -416,11 +428,6 @@ impl GattServer {
 
         let (inbound_side, bridge_side) = tokio::io::duplex(DUPLEX_BUFFER);
         let (from_inbound, to_inbound) = tokio::io::split(bridge_side);
-        let codec = LengthDelimitedCodec::builder()
-            .length_field_length(4)
-            .big_endian()
-            .num_skip(0)
-            .new_codec();
 
         let id = format!("ble-{:08x}", rand::random::<u32>());
         info!("{INNER_NAME}: weave socket open with {device} as {id} ({packet_size}-byte packets)");
@@ -432,7 +439,7 @@ impl GattServer {
         self.connection = Some(WeaveConnection {
             device,
             to_inbound,
-            from_inbound: FramedRead::new(from_inbound, codec),
+            from_inbound: FramedRead::new(from_inbound, frame_codec()),
             writer: PacketWriter::new(packet_size),
             reassembler: Reassembler::default(),
         });
@@ -598,5 +605,22 @@ mod tests {
         );
         assert_eq!(parse_socket_message(&[1, 2, 3, 4]), SocketMessage::Unknown);
         assert_eq!(parse_socket_message(&[0xFC]), SocketMessage::Unknown);
+    }
+
+    #[test]
+    fn splits_frames_keeping_the_length_prefix() {
+        use tokio_util::codec::Decoder;
+
+        let mut stream = bytes::BytesMut::from(&[0, 0, 0, 3, 7, 8, 9, 0, 0, 0, 1, 5][..]);
+        let mut codec = frame_codec();
+        assert_eq!(
+            codec.decode(&mut stream).unwrap().as_deref(),
+            Some(&[0, 0, 0, 3, 7, 8, 9][..])
+        );
+        assert_eq!(
+            codec.decode(&mut stream).unwrap().as_deref(),
+            Some(&[0, 0, 0, 1, 5][..])
+        );
+        assert!(stream.is_empty());
     }
 }
