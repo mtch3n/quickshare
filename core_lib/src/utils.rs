@@ -138,32 +138,59 @@ pub fn get_download_dir() -> PathBuf {
     Path::new("/").to_path_buf()
 }
 
-/// The address phones on our LAN reach us at, offered for Wi-Fi upgrades: the
-/// source address of the default route (which skips container bridges),
-/// else the first private address.
+/// The address phones on our LAN reach us at, offered for Wi-Fi upgrades: a
+/// private address on a physical network card (Wi-Fi or Ethernet), which skips
+/// VPN tunnels and container bridges. A full-tunnel VPN owns the default route,
+/// so the route's source address is only the fallback, then any private address.
 pub fn lan_ipv4() -> Option<Ipv4Addr> {
-    let routed = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
-        .and_then(|socket| {
-            // Only selects a route, nothing is sent. TEST-NET-1 has no route of
-            // its own, so the default route is picked.
-            socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9))?;
-            socket.local_addr()
-        })
-        .ok()
-        .and_then(|addr| match addr.ip() {
-            IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
-            _ => None,
-        });
+    let private = private_ipv4s();
+    private
+        .iter()
+        .copied()
+        .find(|ip| is_physical(*ip))
+        .or_else(routed_ipv4)
+        .or_else(|| private.first().copied())
+}
 
-    routed.or_else(|| {
-        if_addrs::get_if_addrs()
-            .ok()?
-            .into_iter()
-            .find_map(|iface| match iface.ip() {
-                IpAddr::V4(ip) if ip.is_private() => Some(ip),
-                _ => None,
-            })
+/// Our private IPv4 addresses, one per network we are on.
+pub fn private_ipv4s() -> Vec<Ipv4Addr> {
+    if_addrs::get_if_addrs()
+        .map(|ifaces| {
+            ifaces
+                .into_iter()
+                .filter_map(|iface| match iface.ip() {
+                    IpAddr::V4(ip) if ip.is_private() => Some(ip),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `ip` belongs to a physical network card rather than a VPN tunnel
+/// or a container bridge.
+fn is_physical(ip: Ipv4Addr) -> bool {
+    if_addrs::get_if_addrs().is_ok_and(|ifaces| {
+        ifaces.iter().any(|iface| {
+            iface.ip() == IpAddr::V4(ip)
+                && Path::new("/sys/class/net")
+                    .join(&iface.name)
+                    .join("device")
+                    .exists()
+        })
     })
+}
+
+/// The source address of the default route.
+fn routed_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    // Only selects a route, nothing is sent. TEST-NET-1 has no route of its
+    // own, so the default route is picked.
+    socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
 }
 
 pub fn is_not_self_ip(ip_address: &Ipv4Addr) -> bool {
