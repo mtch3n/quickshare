@@ -106,9 +106,7 @@ export function App() {
             : { title: "Settings", onBack: () => setPage("home") })}
       />
       <main className="min-h-0 flex-1 overflow-y-auto">
-        {page === "home" && (
-          <HomePage onPickFiles={handleAddFiles} onSendText={sendText} />
-        )}
+        {page === "home" && <HomePage onPickFiles={handleAddFiles} />}
         {page === "send" && payload && (
           <SendPage
             payload={payload}
