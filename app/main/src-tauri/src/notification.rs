@@ -132,7 +132,7 @@ pub fn send_received_notification(
         }
         "open" => {
             if let Some(url) = &text_payload
-                && crate::is_web_url(url)
+                && rqs_lib::is_web_url(url)
             {
                 let opener = app_handle.opener();
                 if let Err(e) = opener.open_url(url, None::<&str>) {

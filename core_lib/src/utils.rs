@@ -207,6 +207,25 @@ pub fn sanitize_file_name(name: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// A relative path sent by a peer, like `folder/photo.jpg`, reduced to plain
+/// names so it stays inside the download directory.
+pub fn sanitize_relative_path(path: &str) -> Option<PathBuf> {
+    let parts = path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .map(sanitize_file_name)
+        .collect::<Option<PathBuf>>()?;
+    (parts.components().next().is_some()).then_some(parts)
+}
+
+/// Links from peers are only opened if they are web links: a `file:` or custom
+/// scheme URL would hand attacker-controlled input to arbitrary handlers.
+pub fn is_web_url(url: &str) -> bool {
+    let url = url.trim().to_ascii_lowercase();
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.contains(char::is_whitespace)
+}
+
 /// Creates `path` without overwriting anything, falling back to `name (1).ext`,
 /// `name (2).ext`, ... when it already exists.
 pub fn create_unique_file(path: &Path) -> std::io::Result<(PathBuf, File)> {

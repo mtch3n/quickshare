@@ -188,6 +188,7 @@ function DeviceRow({
       id: endpoint.id,
       name: endpoint.name ?? "Unknown device",
       addr: `${endpoint.ip}:${endpoint.port}`,
+      protocol: endpoint.protocol,
       ob: payload,
     })
   }
@@ -202,7 +203,11 @@ function DeviceRow({
           {endpoint.name ?? "Unknown device"}
         </ItemTitle>
         <ItemDescription>
-          {requested ? sendStatus(transfer) : "Ready"}
+          {requested
+            ? sendStatus(transfer)
+            : endpoint.protocol === "QuickShare"
+              ? "Quick Share"
+              : "LocalSend"}
         </ItemDescription>
       </ItemContent>
       <ItemActions>

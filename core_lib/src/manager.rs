@@ -8,7 +8,7 @@ use ts_rs::TS;
 use crate::channel::{ChannelDirection, ChannelMessage, TransferType};
 use crate::errors::AppError;
 use crate::hdl::{
-    InboundRequest, OutboundPayload, OutboundRequest, State, Transport, UpgradeRegistry,
+    InboundRequest, OutboundPayload, OutboundRequest, Protocol, State, Transport, UpgradeRegistry,
     client_introduction,
 };
 use crate::utils::RemoteDeviceInfo;
@@ -21,6 +21,7 @@ pub struct SendInfo {
     pub id: String,
     pub name: String,
     pub addr: String,
+    pub protocol: Protocol,
     pub ob: OutboundPayload,
 }
 

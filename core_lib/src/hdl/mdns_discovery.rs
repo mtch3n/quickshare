@@ -17,6 +17,17 @@ use crate::utils::{is_not_self_ip, parse_endpoint_info};
 const SERVICE_TYPE: &str = "_FC9F5ED42C8A._tcp.local.";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// The protocol a nearby device is reached over.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, TS)]
+#[ts(export)]
+pub enum Protocol {
+    #[default]
+    QuickShare,
+    LocalSend {
+        https: bool,
+    },
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, TS)]
 #[ts(export)]
 pub struct EndpointInfo {
@@ -26,6 +37,7 @@ pub struct EndpointInfo {
     pub port: Option<String>,
     pub rtype: Option<DeviceType>,
     pub present: Option<bool>,
+    pub protocol: Protocol,
 }
 
 pub struct MDnsDiscovery {
@@ -116,5 +128,6 @@ fn endpoint_from_service(info: &ResolvedService) -> Option<EndpointInfo> {
         port: Some(port.to_string()),
         rtype: Some(device_type),
         present: Some(true),
+        protocol: Protocol::QuickShare,
     })
 }

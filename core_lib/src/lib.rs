@@ -18,19 +18,22 @@ use crate::hdl::{
     BleListener, GattServer, MDnsServer, ReceiverAdvertiser, UpgradeRegistry, WifiLanUpgrade,
     receiver_advertisement,
 };
+use crate::localsend::LocalSend;
 use crate::manager::TcpServer;
 
 pub mod channel;
 mod errors;
 mod hdl;
+mod localsend;
 mod manager;
 mod utils;
 
 pub use hdl::info::{WifiNetwork, WifiSecurity};
-pub use hdl::{EndpointInfo, OutboundPayload, State, TextPayloadType, Visibility};
+pub use hdl::{EndpointInfo, OutboundPayload, Protocol, State, TextPayloadType, Visibility};
 pub use manager::SendInfo;
 pub use utils::{
-    DeviceType, effective_device_name, get_download_dir, hostname, normalize_device_name,
+    DeviceType, effective_device_name, get_download_dir, hostname, is_web_url,
+    normalize_device_name,
 };
 
 pub mod sharing_nearby {
@@ -52,6 +55,10 @@ pub mod location_nearby_connections {
 static CUSTOM_DOWNLOAD: RwLock<Option<PathBuf>> = RwLock::new(None);
 static CUSTOM_DEVICE_NAME: RwLock<Option<String>> = RwLock::new(None);
 
+/// Held by tests that set or depend on the download directory.
+#[cfg(test)]
+static DOWNLOAD_DIR_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug)]
 pub struct RQS {
     tracker: Option<TaskTracker>,
@@ -72,6 +79,9 @@ pub struct RQS {
     ble_sender: broadcast::Sender<()>,
 
     port_number: Option<u32>,
+    /// Keeps the LocalSend certificate, and so our LocalSend identity.
+    data_dir: Option<PathBuf>,
+    localsend: Option<LocalSend>,
 
     pub message_sender: broadcast::Sender<ChannelMessage>,
 }
@@ -82,6 +92,7 @@ impl RQS {
         port_number: Option<u32>,
         download_path: Option<PathBuf>,
         device_name: Option<String>,
+        data_dir: Option<PathBuf>,
     ) -> Self {
         *CUSTOM_DOWNLOAD.write().unwrap() = download_path;
         *CUSTOM_DEVICE_NAME.write().unwrap() = device_name;
@@ -107,6 +118,8 @@ impl RQS {
             device_name_receiver,
             ble_sender,
             port_number,
+            data_dir,
+            localsend: None,
             message_sender,
         }
     }
@@ -131,18 +144,57 @@ impl RQS {
             registry: UpgradeRegistry::default(),
         };
 
-        // MPSC for the TcpServer
-        let send_channel = mpsc::channel(10);
+        // Quick Share sends go through the TcpServer
+        let (quick_share_sender, quick_share_receiver) = mpsc::channel(10);
         // Start TcpServer in own "task"
         let mut server = TcpServer::new(
             endpoint_id[..4].try_into()?,
             tcp_listener,
             self.message_sender.clone(),
-            send_channel.1,
+            quick_share_receiver,
             upgrade.registry.clone(),
         )?;
         let ctk = ctoken.clone();
         tracker.spawn(async move { server.run(ctk).await });
+
+        // LocalSend is a nice to have too, e.g. when its port is taken.
+        self.localsend = LocalSend::start(
+            self.data_dir.clone(),
+            self.device_name_receiver.clone(),
+            self.visibility_receiver.clone(),
+            self.message_sender.clone(),
+            &tracker,
+            ctoken.clone(),
+        )
+        .inspect_err(|e| warn!("LocalSend unavailable: {e}"))
+        .ok();
+
+        // Hands each send to the protocol the device was found over.
+        let (send_sender, mut send_receiver) = mpsc::channel::<SendInfo>(10);
+        let localsend = self.localsend.clone();
+        let ctk = ctoken.clone();
+        tracker.spawn(async move {
+            loop {
+                let info = tokio::select! {
+                    _ = ctk.cancelled() => break,
+                    info = send_receiver.recv() => match info {
+                        Some(info) => info,
+                        None => break,
+                    },
+                };
+                match (info.protocol.clone(), &localsend) {
+                    (Protocol::QuickShare, _) => {
+                        let _ = quick_share_sender.send(info).await;
+                    }
+                    (Protocol::LocalSend { https }, Some(localsend)) => {
+                        localsend.send(info, https);
+                    }
+                    (Protocol::LocalSend { .. }, None) => {
+                        warn!("Can't send to {}: LocalSend is unavailable", info.name);
+                    }
+                }
+            }
+        });
 
         // Bluetooth is a nice to have: without it we still work over Wi-Fi LAN.
         match BleListener::new(self.ble_sender.clone()).await {
@@ -199,7 +251,7 @@ impl RQS {
 
         tracker.close();
 
-        Ok((send_channel.0, self.ble_sender.subscribe()))
+        Ok((send_sender, self.ble_sender.subscribe()))
     }
 
     pub fn discovery(
@@ -231,6 +283,10 @@ impl RQS {
             }
         });
 
+        if let Some(localsend) = &self.localsend {
+            localsend.start_discovery(sender.clone());
+        }
+
         let discovery = MDnsDiscovery::new(sender)?;
         tracker.spawn(async move { discovery.run(ctk.clone()).await });
 
@@ -238,6 +294,9 @@ impl RQS {
     }
 
     pub fn stop_discovery(&mut self) {
+        if let Some(localsend) = &self.localsend {
+            localsend.stop_discovery();
+        }
         if let Some(discovert_ctk) = &self.discovery_ctk {
             discovert_ctk.cancel();
             self.discovery_ctk = None;
@@ -275,6 +334,7 @@ impl RQS {
 
         self.ctoken = None;
         self.tracker = None;
+        self.localsend = None;
     }
 
     // Setting None here will resume the default settings
@@ -291,7 +351,8 @@ mod tests {
 
     #[test]
     fn device_name_falls_back_to_hostname() {
-        let rqs = RQS::new(Visibility::Visible, None, None, Some("Desk".into()));
+        let _download_dir = DOWNLOAD_DIR_TEST_LOCK.blocking_lock();
+        let rqs = RQS::new(Visibility::Visible, None, None, Some("Desk".into()), None);
         assert_eq!(*rqs.device_name_receiver.borrow(), "Desk");
 
         rqs.set_device_name("  ".into());

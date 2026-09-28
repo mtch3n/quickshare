@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rqs_lib::channel::{ChannelAction, ChannelDirection, ChannelMessage};
-use rqs_lib::{EndpointInfo, RQS, SendInfo, State, TextPayloadType, Visibility};
+use rqs_lib::{EndpointInfo, RQS, SendInfo, State, TextPayloadType, Visibility, is_web_url};
 use tauri::{AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -135,7 +135,14 @@ fn run() -> Result<(), anyhow::Error> {
             // Block until the service is up so the logger is already in place
             // and every command can rely on AppState being managed.
             tauri::async_runtime::block_on(async move {
-                let mut rqs = RQS::new(visibility, port_number, download_path, device_name);
+                let data_dir = app_handle.path().app_data_dir().ok();
+                let mut rqs = RQS::new(
+                    visibility,
+                    port_number,
+                    download_path,
+                    device_name,
+                    data_dir,
+                );
                 let (sender_file, ble_receiver) = rqs.run().await?;
 
                 app_handle.manage(AppState {
@@ -420,12 +427,4 @@ pub fn kill_app(app_handle: &AppHandle) {
     });
 
     app_handle.exit(-1);
-}
-
-/// Links from peers are only opened if they are web links: a `file:` or custom
-/// scheme URL would hand attacker-controlled input to arbitrary handlers.
-pub fn is_web_url(url: &str) -> bool {
-    let url = url.trim().to_ascii_lowercase();
-    (url.starts_with("https://") || url.starts_with("http://"))
-        && !url.contains(char::is_whitespace)
 }
