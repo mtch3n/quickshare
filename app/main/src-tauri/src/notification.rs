@@ -3,14 +3,13 @@ use rqs_lib::Visibility;
 use rqs_lib::channel::ChannelAction;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_opener::OpenerExt;
 
 use crate::{AppState, commands, open_main_window};
 
 fn base() -> Notification {
     let mut n = Notification::new();
-    n.appname("RQuickShare")
-        .summary("RQuickShare")
+    n.appname("QuickShare")
+        .summary("QuickShare")
         .icon("rquickshare")
         .hint(Hint::DesktopEntry("rquickshare".into()));
     n
@@ -120,24 +119,24 @@ pub fn send_received_notification(
     let app_handle = app_handle.clone();
     show(notification, move |action| match action {
         "default" => {
-            if let Some(dest) = &destination {
-                let opener = app_handle.opener();
-                if let Err(e) = opener.open_path(dest, None::<&str>) {
-                    error!("Couldn't open folder: {e}");
-                } else {
-                    return;
+            let (app_handle, destination) = (app_handle.clone(), destination.clone());
+            tauri::async_runtime::spawn(async move {
+                if let Some(dest) = &destination {
+                    match crate::open::path(dest).await {
+                        Ok(()) => return,
+                        Err(e) => error!("Couldn't open folder: {e}"),
+                    }
                 }
-            }
-            open_main_window(&app_handle);
+                open_main_window(&app_handle);
+            });
         }
         "open" => {
-            if let Some(url) = &text_payload
-                && rqs_lib::is_web_url(url)
-            {
-                let opener = app_handle.opener();
-                if let Err(e) = opener.open_url(url, None::<&str>) {
-                    error!("Couldn't open URL: {e}");
-                }
+            if let Some(url) = text_payload.clone() {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::open::url(&url).await {
+                        error!("Couldn't open URL: {e}");
+                    }
+                });
             }
         }
         "copy" => {

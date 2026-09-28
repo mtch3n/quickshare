@@ -10,20 +10,25 @@ use anyhow::anyhow;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Query, State as AxumState};
 use axum::http::StatusCode;
+use axum::middleware::AddExtension;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use axum_server::Handle;
-use axum_server::tls_rustls::RustlsConfig;
+use axum_server::accept::Accept;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use rustls::ServerConfig;
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
+use tower_layer::Layer;
 
 use super::{
     API, DeviceInfo, PROGRESS_INTERVAL, PrepareUpload, PrepareUploadResponse, Shared, message_text,
-    next_action, random_id, text_type, watch_cancel,
+    next_action, random_id, text_type, tls, watch_cancel,
 };
 use crate::channel::{ChannelAction, TransferType};
 use crate::hdl::State;
@@ -33,6 +38,39 @@ use crate::utils::{
 };
 
 type SharedState = AxumState<Arc<Shared>>;
+
+/// The fingerprint of the certificate the sender presented on this
+/// connection, if any. The handshake proved it holds the certificate's key.
+#[derive(Clone)]
+struct SenderCert(Option<String>);
+
+/// Completes the TLS handshake, then hands [`SenderCert`] to the handlers.
+#[derive(Clone)]
+struct SenderCertAcceptor(RustlsAcceptor);
+
+impl<I, S> Accept<I, S> for SenderCertAcceptor
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: Send + 'static,
+{
+    type Stream = TlsStream<I>;
+    type Service = AddExtension<S, SenderCert>;
+    type Future = BoxFuture<'static, std::io::Result<(Self::Stream, Self::Service)>>;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let acceptor = self.0.clone();
+        Box::pin(async move {
+            let (stream, service) = acceptor.accept(stream, service).await?;
+            let cert = stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certs| certs.first())
+                .map(|cert| tls::fingerprint(cert));
+            Ok((stream, Extension(SenderCert(cert)).layer(service)))
+        })
+    }
+}
 
 /// How long a sender waits for the user to decide before we give up.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -82,13 +120,13 @@ pub async fn serve(
     });
 
     info!("LocalSend: serving on port {port}");
-    axum_server::bind_rustls(
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
-        RustlsConfig::from_config(tls),
-    )
-    .handle(handle)
-    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-    .await?;
+    axum_server::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))
+        .acceptor(SenderCertAcceptor(RustlsAcceptor::new(
+            RustlsConfig::from_config(tls),
+        )))
+        .handle(handle)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await?;
     Ok(())
 }
 
@@ -125,6 +163,7 @@ impl Drop for PendingRequest<'_> {
 async fn prepare_upload(
     AxumState(shared): SharedState,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(sender): Extension<SenderCert>,
     Json(request): Json<PrepareUpload>,
 ) -> Response {
     if !shared.visible() {
@@ -160,6 +199,7 @@ async fn prepare_upload(
         source: Some(RemoteDeviceInfo {
             name: request.info.alias.clone(),
             device_type: request.info.device_type(),
+            fingerprint: sender.0,
         }),
         destination: text.is_none().then(|| dir.to_string_lossy().into_owned()),
         files: text.is_none().then_some(names),
@@ -403,6 +443,11 @@ async fn cancel(
     if remote == Some(addr.ip()) {
         info!("LocalSend: sender cancelled session {}", query.session_id);
         end(&shared, &query.session_id, State::Cancelled);
+    } else if let Some((peer, token)) = shared.outbound.lock().unwrap().get(&query.session_id)
+        && *peer == addr.ip()
+    {
+        info!("LocalSend: receiver cancelled session {}", query.session_id);
+        token.cancel();
     }
     StatusCode::OK
 }

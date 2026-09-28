@@ -52,6 +52,9 @@ pub enum State {
     Rejected,
     Cancelled,
     Finished,
+    /// A LocalSend receiver wants a PIN (or a different one): send again
+    /// with it.
+    PinRequired,
 }
 
 #[derive(Debug, Default)]

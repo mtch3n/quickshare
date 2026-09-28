@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=RQuickShare
+Name=QuickShare
 GenericName=Quick Share
 Comment=Send and receive files with nearby Android devices
 Exec={{exec}} %F

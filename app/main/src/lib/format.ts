@@ -2,6 +2,23 @@ export function fileName(path: string) {
   return path.split("/").pop() || path
 }
 
+const KINDS = {
+  image: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "ico"],
+  video: ["mp4", "mkv", "webm", "mov", "avi", "m4v", "3gp"],
+  audio: ["mp3", "flac", "ogg", "opus", "wav", "m4a", "aac"],
+  archive: ["zip", "tar", "gz", "xz", "zst", "7z", "rar", "bz2"],
+  text: ["txt", "md", "pdf", "doc", "docx", "odt", "rtf", "csv"],
+}
+
+export type FileKind = keyof typeof KINDS | "other"
+
+/** A rough kind from the file extension, for icons and previews. */
+export function fileKind(path: string): FileKind {
+  const ext = fileName(path).split(".").pop()?.toLowerCase() ?? ""
+  const kind = Object.entries(KINDS).find(([, exts]) => exts.includes(ext))
+  return kind ? (kind[0] as FileKind) : "other"
+}
+
 export function plural(count: number, word: string) {
   return `${count} ${word}${count === 1 ? "" : "s"}`
 }

@@ -141,6 +141,7 @@ impl Service {
                 addr: format!("{ip}:{port}"),
                 protocol: endpoint.protocol.clone(),
                 ob: payload,
+                pin: None,
             })
             .await
             .map_err(|e| fdo::Error::Failed(e.to_string()))?;
@@ -294,6 +295,7 @@ pub fn is_terminal(state: &str) -> bool {
         State::Rejected,
         State::Cancelled,
         State::Disconnected,
+        State::PinRequired,
     ]
     .iter()
     .any(|s| format!("{s:?}") == state)

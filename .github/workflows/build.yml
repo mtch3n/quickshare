@@ -91,7 +91,7 @@ jobs:
         run: |
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           if [ "${{ github.ref_type }}" = tag ]; then label="$version"; else label="$version-$(git rev-parse --short HEAD)"; fi
-          out="RQuickShare-$label-x86_64.AppImage"
+          out="QuickShare-$label-x86_64.AppImage"
           app/main/src-tauri/linux/repack-appimage.sh target/release/bundle/appimage/rquickshare.AppDir "$out"
           echo "path=$out" >> "$GITHUB_OUTPUT"
 
@@ -100,12 +100,17 @@ jobs:
           name: ${{ steps.appimage.outputs.path }}
           path: ${{ steps.appimage.outputs.path }}
 
+      # Unzip and load unpacked in a Chromium-based browser.
+      - name: Zip browser extension
+        run: cd browser-extension && zip -r ../QuickShare-browser-extension.zip .
+
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ github.ref_name }}" "${{ steps.appimage.outputs.path }}" \
+            QuickShare-browser-extension.zip \
             --title "${{ github.ref_name }}" --generate-notes
 
       - name: Publish nightly
@@ -121,4 +126,5 @@ jobs:
             gh release create nightly --prerelease --title "Nightly" \
               --notes "Built automatically from the latest commit on master."
           fi
-          gh release upload nightly "${{ steps.appimage.outputs.path }}"
+          gh release upload nightly "${{ steps.appimage.outputs.path }}" \
+            QuickShare-browser-extension.zip

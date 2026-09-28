@@ -32,8 +32,8 @@ pub use hdl::info::{WifiNetwork, WifiSecurity};
 pub use hdl::{EndpointInfo, OutboundPayload, Protocol, State, TextPayloadType, Visibility};
 pub use manager::SendInfo;
 pub use utils::{
-    DeviceType, effective_device_name, get_download_dir, hostname, is_web_url,
-    normalize_device_name,
+    DeviceType, RemoteDeviceInfo, effective_device_name, expand_directories, get_download_dir,
+    hostname, is_web_url, normalize_device_name,
 };
 
 pub mod sharing_nearby {

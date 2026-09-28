@@ -248,7 +248,7 @@ async fn connect(connection: &zbus::Connection) -> Result<RQuickShareProxy<'_>, 
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .context("couldn't start RQuickShare")?;
+            .context("couldn't start QuickShare")?;
 
         let started = tokio::time::timeout(Duration::from_secs(20), async {
             while !dbus.name_has_owner(name.clone()).await.unwrap_or(false) {
@@ -257,7 +257,7 @@ async fn connect(connection: &zbus::Connection) -> Result<RQuickShareProxy<'_>, 
         })
         .await;
         if started.is_err() {
-            bail!("RQuickShare didn't start");
+            bail!("QuickShare didn't start");
         }
     }
 

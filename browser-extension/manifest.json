@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "RQuickShare",
-  "description": "Send the current page, a link or selected text to a nearby phone with RQuickShare.",
+  "name": "QuickShare",
+  "description": "Send the current page, a link or selected text to a nearby phone with QuickShare.",
   "version": "1.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArBx+baLpb9KqA/DTh7pF/bGHQnFTqB6t7oWBs12VpXQMvyukBxVg6HuZoZreAFB4m9TRB08/zPWNtQnQaLeoNZ0LlKJCb0+hxCarKweQxeIt6IKFVM63kuq8SDerez3kfrSmLUpj0vG+bkSBNP8lBP8V/ocFxnc7uEDWKEyHx94eWQNuuf06O4ouOtkE0x94HWzWZTPBz+rG4U1GWd1eU/aWGJ2LEvd/gQwcShPey4358HyGybTnkiOgtC8g/ECBhPyXpF/7snTGoRzQ3QxL1Xxa1TX7K3eK6vf7fDZEwhoZhYt1gxTd7GGBEvNXxzFA8tWNpx5ynwUtFDtO+U4FbQIDAQAB",
   "icons": { "32": "icon-32.png", "128": "icon-128.png" },
-  "action": { "default_title": "Send this page with RQuickShare" },
+  "action": { "default_title": "Send this page with QuickShare" },
   "background": { "service_worker": "background.js" },
   "permissions": ["activeTab", "contextMenus", "nativeMessaging"]
 }

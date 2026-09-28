@@ -1,4 +1,4 @@
-// A Quick Settings tile for RQuickShare, driven over its D-Bus service. The
+// A Quick Settings tile for QuickShare, driven over its D-Bus service. The
 // tile shows while the app runs: on means visible to everyone nearby.
 import Gio from "gi://Gio"
 import GObject from "gi://GObject"
@@ -38,7 +38,7 @@ const QuickShareToggle = GObject.registerClass(
         this._setVisibility("temporary")
       )
       this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem())
-      this.menu.addAction("Open RQuickShare", () => {
+      this.menu.addAction("Open QuickShare", () => {
         this._proxy?.ShowAsync().catch(logError)
         Main.panel.closeQuickSettings()
       })

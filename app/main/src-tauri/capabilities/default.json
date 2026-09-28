@@ -13,16 +13,6 @@
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",
-    "clipboard-manager:allow-write-text",
-    "opener:allow-default-urls",
-    {
-      "identifier": "opener:allow-open-path",
-      "allow": [
-        {
-          "path": "/**"
-        }
-      ]
-    },
-    "opener:allow-reveal-item-in-dir"
+    "clipboard-manager:allow-write-text"
   ]
 }

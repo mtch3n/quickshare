@@ -1,6 +1,29 @@
 # Changelog
 
-## 0.12.0 (unreleased)
+## 0.13.0
+
+### Features
+
+* The app is now called QuickShare
+* Settings in grouped cards, with inline fields and shorter help text
+* Accent colour: follows the desktop's accent (GNOME 47+, KDE), or pick neutral, one of GNOME's colours or any colour; the default palette is neutral
+* Send page: image thumbnails and sizes; several files fold into one row; *Add files* adds to the list instead of replacing it
+* Protocol badge (Quick Share / LocalSend) next to each nearby device
+* LocalSend: enter the receiver's PIN when it asks for one; "busy" and "too many wrong PINs" are shown instead of a generic failure
+* Older transfers on the home page fold away
+* About section with the version and a check for updates
+* The browser extension is published with each release as `QuickShare-browser-extension.zip` instead of being installed by the app
+
+### Bug Fixes
+
+* LocalSend: sending works with current LocalSend versions, which require the sender's certificate
+* LocalSend: only sends to the device that announced itself (its certificate must match its fingerprint)
+* LocalSend devices are trusted by their certificate rather than their name, which anyone can copy. Trusted devices need to be trusted again
+* LocalSend: fingerprints are uppercase, as LocalSend compares them; cancelling on the receiver cancels the send
+* Links and folders open in the default browser and file manager (through the desktop portal) instead of from inside the AppImage's environment
+* Scrolling no longer stutters (WebKitGTK smooth scrolling is off)
+
+## 0.12.0
 
 First release of this fork (mtch3n/quickshare). Linux only, distributed as an AppImage.
 

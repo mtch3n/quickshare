@@ -23,6 +23,9 @@ pub struct SendInfo {
     pub addr: String,
     pub protocol: Protocol,
     pub ob: OutboundPayload,
+    /// The PIN a LocalSend receiver asked for. Quick Share has none.
+    #[serde(default)]
+    pub pin: Option<String>,
 }
 
 pub struct TcpServer {
@@ -158,6 +161,7 @@ async fn connect(
         RemoteDeviceInfo {
             device_type: crate::DeviceType::Unknown,
             name: si.name,
+            fingerprint: None,
         },
     );
 

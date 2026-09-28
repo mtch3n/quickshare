@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "RQuickShare",
+        "title": "QuickShare",
         "width": 440,
         "height": 680,
         "minWidth": 380,
@@ -23,7 +23,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     }
   },
   "bundle": {

@@ -1,7 +1,6 @@
 import * as React from "react"
 import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { open } from "@tauri-apps/plugin-dialog"
-import { openPath } from "@tauri-apps/plugin-opener"
 import { SettingsIcon, UploadIcon } from "lucide-react"
 
 import type { OutboundPayload } from "@bindings/OutboundPayload"
@@ -30,13 +29,16 @@ export function App() {
     setPage("send")
   }, [])
 
-  const addFiles = React.useCallback(
-    (paths: string[]) => {
-      if (paths.length === 0) return
-      startSending({ Files: paths })
-    },
-    [startSending]
-  )
+  /** Adds to the files already being sent, or starts sending these. */
+  const addFiles = React.useCallback((paths: string[]) => {
+    if (paths.length === 0) return
+    setPayload((current) =>
+      current && "Files" in current
+        ? { Files: [...new Set([...current.Files, ...paths])] }
+        : { Files: paths }
+    )
+    setPage("send")
+  }, [])
 
   const sendText = React.useCallback(
     (text: string) => {
@@ -75,21 +77,12 @@ export function App() {
     setPage("home")
   }
 
-  const handleAddFiles = React.useCallback(async () => {
-    const picked = await open({
-      multiple: true,
-      title: "Choose files or folders to send",
-      directory: false,
-    })
-    if (picked) addFiles(picked)
-  }, [addFiles])
-
   return (
     <div className="flex h-svh flex-col">
       <TitleBar
         {...(page === "home"
           ? {
-              title: "RQuickShare",
+              title: "QuickShare",
               actions: (
                 <Button
                   variant="ghost"
@@ -105,12 +98,15 @@ export function App() {
             ? { title: sendTitle(payload), onBack: leaveSend }
             : { title: "Settings", onBack: () => setPage("home") })}
       />
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        {page === "home" && <HomePage onPickFiles={handleAddFiles} />}
+      <main
+        key={page}
+        className="min-h-0 flex-1 animate-in overflow-y-auto duration-200 fade-in-0"
+      >
+        {page === "home" && <HomePage onPickFiles={pickFiles} />}
         {page === "send" && payload && (
           <SendPage
             payload={payload}
-            onAddFiles={handleAddFiles}
+            onAddFiles={pickFiles}
             onRemoveFile={(path) => {
               if ("Files" in payload) {
                 const rest = payload.Files.filter((f) => f !== path)
@@ -126,7 +122,7 @@ export function App() {
       <IncomingDialog />
 
       {dragging && (
-        <div className="pointer-events-none fixed inset-2 flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary bg-background/90 text-primary">
+        <div className="pointer-events-none fixed inset-2 flex animate-in flex-col items-center justify-center gap-2 rounded-xl bg-background/95 text-primary ring-2 ring-primary/40 duration-150 fade-in-0 zoom-in-95">
           <UploadIcon />
           <p className="font-medium">Drop to send</p>
         </div>
@@ -163,7 +159,17 @@ function useReceivedToasts() {
         description: `From ${t.meta?.source?.name ?? "a nearby device"}`,
         type: "success",
         actionProps: folder
-          ? { children: "Open folder", onClick: () => openPath(folder) }
+          ? {
+              children: "Open folder",
+              onClick: () =>
+                api.openPath(folder).catch((e) =>
+                  toast.add({
+                    title: "Couldn't open the folder",
+                    description: String(e),
+                    type: "error",
+                  })
+                ),
+            }
           : undefined,
       })
     }

@@ -5,25 +5,27 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rqs_lib::channel::{ChannelAction, ChannelDirection, ChannelMessage};
-use rqs_lib::{EndpointInfo, RQS, SendInfo, State, TextPayloadType, Visibility, is_web_url};
+use rqs_lib::{EndpointInfo, RQS, SendInfo, State, TextPayloadType, Visibility};
 use tauri::{AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::logger::set_up_logging;
 use crate::notification::{send_request_notification, send_temporarily_notification};
 use crate::tray::TrayHandle;
 
+mod accent;
 mod cli;
 mod commands;
 mod dbus;
 mod integrations;
 mod logger;
 mod notification;
+mod open;
 mod store;
 mod tray;
+mod update;
 mod wifi;
 
 /// Passed by the autostart entry so the app starts in the tray.
@@ -72,6 +74,10 @@ fn main() -> Result<(), anyhow::Error> {
         .build()?;
     tauri::async_runtime::set(runtime.handle().clone());
 
+    // reqwest (update checks, LocalSend) and LocalSend's server share rustls'
+    // process-wide crypto provider.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     run()
 }
 
@@ -101,7 +107,6 @@ fn run() -> Result<(), anyhow::Error> {
             Some(vec![HIDDEN_ARG]),
         ))
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
         .manage(PendingFiles(Mutex::new(initial_files)))
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
@@ -120,10 +125,15 @@ fn run() -> Result<(), anyhow::Error> {
             commands::untrust_device,
             commands::set_auto_open_links,
             commands::set_auto_copy_text,
+            commands::system_accent_color,
+            commands::inspect_files,
+            commands::open_url,
+            commands::open_path,
+            commands::check_update,
         ])
         .setup(move |app| {
             set_up_logging(app.app_handle())?;
-            debug!("Starting setup of RQuickShare app");
+            debug!("Starting setup of QuickShare app");
 
             // Keep the integrations pointing at the current executable,
             // which moves when an AppImage is updated.
@@ -163,6 +173,13 @@ fn run() -> Result<(), anyhow::Error> {
                 });
                 app_handle.manage(tray::spawn(&app_handle, visibility).await);
 
+                let accent_app = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = accent::watch(accent_app).await {
+                        warn!("Can't follow the system accent color: {e}");
+                    }
+                });
+
                 let dbus_app = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = dbus::serve(dbus_app).await {
@@ -173,8 +190,18 @@ fn run() -> Result<(), anyhow::Error> {
                 Ok::<_, anyhow::Error>(())
             })?;
 
-            if start_hidden && let Some(window) = app.get_webview_window("main") {
-                let _ = window.hide();
+            if let Some(window) = app.get_webview_window("main") {
+                // WebKitGTK's kinetic smooth scrolling stutters without GPU
+                // compositing, which we turn off above.
+                window.with_webview(|webview| {
+                    use webkit2gtk::{SettingsExt, WebViewExt};
+                    if let Some(settings) = webview.inner().settings() {
+                        settings.set_enable_smooth_scrolling(false);
+                    }
+                })?;
+                if start_hidden {
+                    let _ = window.hide();
+                }
             }
 
             spawn_receiver_tasks(app.app_handle());
@@ -231,16 +258,18 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
 
                     // Auto-accept from trusted devices
                     if waiting {
-                        let name = info
-                            .meta
-                            .as_ref()
-                            .and_then(|meta| meta.source.as_ref())
-                            .map(|source| source.name.clone())
-                            .unwrap_or_else(|| "Unknown".to_string());
-
-                        let trusted_devices = store::trusted_devices(&capp_handle);
-                        if trusted_devices.contains(&name) {
-                            trace!("Auto-accepting from trusted device: {}", name);
+                        let source = info.meta.as_ref().and_then(|meta| meta.source.as_ref());
+                        // Inbound LocalSend transfers have "ls-" ids.
+                        let localsend = info.id.starts_with("ls-");
+                        let trusted = source.is_some_and(|source| {
+                            store::trusted_devices(&capp_handle)
+                                .iter()
+                                .any(|device| device.matches(source, localsend))
+                        });
+                        if let Some(source) = source
+                            && trusted
+                        {
+                            trace!("Auto-accepting from trusted device: {}", source.name);
                             commands::send_action(
                                 &state,
                                 info.id.clone(),
@@ -259,7 +288,7 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                         {
                             let meta = info.meta.as_ref();
                             send_request_notification(
-                                name,
+                                source.map_or_else(|| "Unknown".into(), |s| s.name.clone()),
                                 meta.and_then(|m| m.pin_code.clone()),
                                 meta.and_then(|m| m.files.clone()),
                                 meta.and_then(|m| m.text_type.as_ref().map(|t| format!("{t:?}"))),
@@ -277,11 +306,13 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                             // Auto-open links
                             if store::auto_open_links(&capp_handle)
                                 && matches!(meta.text_type, Some(TextPayloadType::Url))
-                                && let Some(url) = &meta.text_payload
-                                && is_web_url(url)
-                                && let Err(e) = capp_handle.opener().open_url(url, None::<&str>)
+                                && let Some(url) = meta.text_payload.clone()
                             {
-                                warn!("Couldn't auto-open URL: {e}");
+                                tauri::async_runtime::spawn(async move {
+                                    if let Err(e) = open::url(&url).await {
+                                        warn!("Couldn't auto-open URL: {e}");
+                                    }
+                                });
                             }
 
                             // Auto-copy text

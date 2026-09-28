@@ -3,4 +3,9 @@ import type { RemoteDeviceInfo } from "./RemoteDeviceInfo";
 import type { TextPayloadType } from "./TextPayloadType";
 import type { WifiNetwork } from "./WifiNetwork";
 
-export type TransferMetadata = { source: RemoteDeviceInfo | null, pin_code: string | null, destination: string | null, files: Array<string> | null, text_type: TextPayloadType | null, text_description: string | null, text_payload: string | null, wifi: WifiNetwork | null, total_bytes: number, ack_bytes: number, };
+export type TransferMetadata = { source: RemoteDeviceInfo | null, pin_code: string | null, destination: string | null, files: Array<string> | null, text_type: TextPayloadType | null, text_description: string | null, text_payload: string | null, wifi: WifiNetwork | null, total_bytes: number, ack_bytes: number, 
+/**
+ * Why a transfer failed, when we know something more useful than that
+ * the connection was lost.
+ */
+reason: string | null, };

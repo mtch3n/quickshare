@@ -12,8 +12,6 @@ pub const GNOME_EXTENSION_UUID: &str = "rquickshare@mandre.dev";
 /// Fixed by the `key` in the extension's manifest.
 const BROWSER_EXTENSION_ID: &str = "inbbifcfgodjmkpohmifohhkdaofllei";
 const NATIVE_HOST: &str = "dev.mandre.rquickshare";
-/// Where the unpacked browser extension goes, relative to the data dir.
-pub const BROWSER_EXTENSION_DIR: &str = "rquickshare/browser-extension";
 
 /// Config dirs of Chromium-based browsers, whose `NativeMessagingHosts` we
 /// register with when the browser is installed.
@@ -56,7 +54,7 @@ const fn asset(path: &'static str, bytes: &'static [u8]) -> File {
     }
 }
 
-const FILES: [File; 10] = [
+const FILES: [File; 6] = [
     template(
         "nautilus-python/extensions/rquickshare_nautilus.py",
         include_str!("../linux/rquickshare_nautilus.py"),
@@ -84,22 +82,6 @@ const FILES: [File; 10] = [
     asset(
         "gnome-shell/extensions/rquickshare@mandre.dev/rquickshare-symbolic.svg",
         include_bytes!("../linux/gnome-extension/rquickshare-symbolic.svg"),
-    ),
-    asset(
-        "rquickshare/browser-extension/manifest.json",
-        include_bytes!("../linux/browser-extension/manifest.json"),
-    ),
-    asset(
-        "rquickshare/browser-extension/background.js",
-        include_bytes!("../linux/browser-extension/background.js"),
-    ),
-    asset(
-        "rquickshare/browser-extension/icon-32.png",
-        include_bytes!("../linux/browser-extension/icon-32.png"),
-    ),
-    asset(
-        "rquickshare/browser-extension/icon-128.png",
-        include_bytes!("../linux/browser-extension/icon-128.png"),
     ),
 ];
 
@@ -181,7 +163,7 @@ fn native_host_manifests(app: &AppHandle) -> Vec<PathBuf> {
 fn native_host_manifest(exec: &str) -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "name": NATIVE_HOST,
-        "description": "RQuickShare",
+        "description": "QuickShare",
         "path": exec,
         "type": "stdio",
         "allowed_origins": [format!("chrome-extension://{BROWSER_EXTENSION_ID}/")],

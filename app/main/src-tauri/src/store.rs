@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rqs_lib::Visibility;
+use rqs_lib::{RemoteDeviceInfo, Visibility};
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Wry};
 use tauri_plugin_store::{Store, StoreExt};
 
@@ -93,14 +94,36 @@ pub fn log_level(app: &AppHandle) -> Option<String> {
         .and_then(|v| v.as_str().map(String::from))
 }
 
-pub fn trusted_devices(app: &AppHandle) -> Vec<String> {
+/// A device whose transfers are accepted without asking.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustedDevice {
+    pub name: String,
+    /// LocalSend devices are trusted by their certificate. Quick Share ones,
+    /// without it, by name.
+    pub fingerprint: Option<String>,
+}
+
+impl TrustedDevice {
+    /// Whether `source` is this device.
+    pub fn matches(&self, source: &RemoteDeviceInfo, localsend: bool) -> bool {
+        match (&self.fingerprint, localsend) {
+            (Some(trusted), true) => source.fingerprint.as_ref() == Some(trusted),
+            (None, false) => source.name == self.name,
+            // A LocalSend sender can't borrow a Quick Share device's trust by
+            // taking its name, nor the other way round.
+            _ => false,
+        }
+    }
+}
+
+pub fn trusted_devices(app: &AppHandle) -> Vec<TrustedDevice> {
     store(app)
         .get(TRUSTED_DEVICES)
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
 }
 
-pub fn set_trusted_devices(app: &AppHandle, devices: &[String]) {
+pub fn set_trusted_devices(app: &AppHandle, devices: &[TrustedDevice]) {
     store(app).set(TRUSTED_DEVICES, serde_json::json!(devices));
 }
 
@@ -124,4 +147,42 @@ pub fn auto_copy_text(app: &AppHandle) -> bool {
 
 pub fn set_auto_copy_text(app: &AppHandle, enabled: bool) {
     store(app).set(AUTO_COPY_TEXT, enabled);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sender(name: &str, fingerprint: Option<&str>) -> RemoteDeviceInfo {
+        RemoteDeviceInfo {
+            name: name.into(),
+            device_type: rqs_lib::DeviceType::Phone,
+            fingerprint: fingerprint.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn trusts_localsend_devices_by_certificate_only() {
+        let phone = TrustedDevice {
+            name: "Phone".into(),
+            fingerprint: Some("AA".into()),
+        };
+        assert!(phone.matches(&sender("Renamed", Some("AA")), true));
+        assert!(!phone.matches(&sender("Phone", Some("BB")), true));
+        assert!(!phone.matches(&sender("Phone", None), true));
+        assert!(!phone.matches(&sender("Phone", None), false));
+    }
+
+    #[test]
+    fn trusts_quick_share_devices_by_name_only() {
+        let pixel = TrustedDevice {
+            name: "Pixel".into(),
+            fingerprint: None,
+        };
+        assert!(pixel.matches(&sender("Pixel", None), false));
+        assert!(!pixel.matches(&sender("Other", None), false));
+        // A LocalSend sender calling itself "Pixel" isn't the Pixel.
+        assert!(!pixel.matches(&sender("Pixel", Some("AA")), true));
+        assert!(!pixel.matches(&sender("Pixel", None), true));
+    }
 }

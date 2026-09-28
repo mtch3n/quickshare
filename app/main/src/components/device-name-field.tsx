@@ -1,7 +1,13 @@
 import * as React from "react"
-import { Button } from "@/components/ui/button"
-import { Field, FieldDescription, FieldTitle } from "@/components/ui/field"
-import { Input } from "@/components/ui/input"
+import { CheckIcon, RotateCcwIcon } from "lucide-react"
+
+import { Field, FieldLabel } from "@/components/ui/field"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group"
 import { toast } from "@/components/ui/toast"
 import { useQuickShare } from "@/hooks/quick-share"
 import { api } from "@/lib/tauri"
@@ -70,37 +76,43 @@ export function DeviceNameField() {
   }
 
   return (
-    <Field>
-      <FieldTitle>Device name</FieldTitle>
-      <FieldDescription>
-        How this computer appears on other devices.
-      </FieldDescription>
-      <div className="flex gap-2">
-        <Input
-          type="text"
+    <Field orientation="horizontal">
+      <FieldLabel htmlFor="device-name">Device name</FieldLabel>
+      <InputGroup className="w-52">
+        <InputGroupInput
+          id="device-name"
           value={value}
           onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && hasChanged && !isEmpty) handleSave()
+          }}
           placeholder={settings?.deviceName}
           disabled={isLoading}
           maxLength={64}
         />
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleSave}
-          disabled={!hasChanged || isEmpty || isLoading}
-        >
-          Save
-        </Button>
-      </div>
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={handleReset}
-        disabled={isLoading}
-      >
-        Use computer name
-      </Button>
+        <InputGroupAddon align="inline-end">
+          {hasChanged && (
+            <InputGroupButton
+              size="icon-xs"
+              aria-label="Save"
+              title="Save"
+              onClick={handleSave}
+              disabled={isEmpty || isLoading}
+            >
+              <CheckIcon />
+            </InputGroupButton>
+          )}
+          <InputGroupButton
+            size="icon-xs"
+            aria-label="Use computer name"
+            title="Use computer name"
+            onClick={handleReset}
+            disabled={isLoading}
+          >
+            <RotateCcwIcon />
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
     </Field>
   )
 }

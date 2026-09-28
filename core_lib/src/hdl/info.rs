@@ -53,4 +53,8 @@ pub struct TransferMetadata {
     pub total_bytes: u64,
     #[ts(type = "number")]
     pub ack_bytes: u64,
+
+    /// Why a transfer failed, when we know something more useful than that
+    /// the connection was lost.
+    pub reason: Option<String>,
 }

@@ -2,4 +2,8 @@
 import type { OutboundPayload } from "./OutboundPayload";
 import type { Protocol } from "./Protocol";
 
-export type SendInfo = { id: string, name: string, addr: string, protocol: Protocol, ob: OutboundPayload, };
+export type SendInfo = { id: string, name: string, addr: string, protocol: Protocol, ob: OutboundPayload, 
+/**
+ * The PIN a LocalSend receiver asked for. Quick Share has none.
+ */
+pin: string | null, };

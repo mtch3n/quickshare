@@ -1,6 +1,6 @@
 <div align="center">
   <img src="app/main/src-tauri/icons/src/rquickshare.svg" width="96" alt="" />
-  <h1>RQuickShare</h1>
+  <h1>QuickShare</h1>
   <p><strong>Quick Share (Nearby Share) for Linux</strong></p>
 
 [![Build](https://github.com/mtch3n/quickshare/actions/workflows/build.yml/badge.svg)](https://github.com/mtch3n/quickshare/actions/workflows/build.yml)
@@ -12,7 +12,7 @@ Quick Share protocol.
 This is a maintained fork of [Martichou/rquickshare](https://github.com/Martichou/rquickshare),
 which is no longer updated.
 
-![RQuickShare in light and dark mode](.github/demo.png)
+![QuickShare in light and dark mode](.github/demo.png)
 
 ## Install
 
@@ -22,8 +22,8 @@ Download the AppImage from [Releases](https://github.com/mtch3n/quickshare/relea
 - **Nightly**: built from every commit on `master`.
 
 ```bash
-chmod +x RQuickShare-*.AppImage
-./RQuickShare-*.AppImage
+chmod +x QuickShare-*.AppImage
+./QuickShare-*.AppImage
 ```
 
 AppImages need FUSE 2 (`fuse2` on Arch, `libfuse2` on Debian/Ubuntu).
@@ -35,10 +35,14 @@ AppImages need FUSE 2 (`fuse2` on Arch, `libfuse2` on Debian/Ubuntu).
   the PIN matches the one on the phone.
 - **Send**: drop files on the window or click *Choose files*, then pick a
   nearby device.
-- **From your file manager**: turn on *Settings → File manager menu*. This
+- **From your file manager**: turn on *Settings → Desktop integrations*. This
   adds *Send with Quick Share* to the right-click menu of Files (Nautilus),
   Dolphin and Nemo. Files needs the `nautilus-python` package
-  (`python-nautilus` on Arch). You can also run `RQuickShare-*.AppImage --send FILE...`.
+  (`python-nautilus` on Arch). You can also run `QuickShare-*.AppImage --send FILE...`.
+- **From your browser**: download `QuickShare-browser-extension.zip` from
+  [Releases](https://github.com/mtch3n/quickshare/releases), unzip it, and in
+  Chrome, Chromium, Brave, Edge or Vivaldi turn on Developer mode on the
+  extensions page and choose *Load unpacked*. Needs *Desktop integrations* on.
 - **In the background**: closing the window keeps the app in the tray. On GNOME
   that needs the *AppIndicator and KStatusNotifierItem Support* extension.
 
@@ -95,7 +99,7 @@ compete with your other devices.
 start over Bluetooth move to the same port.
 
 **The window is blank.** WebKitGTK's GPU renderer is already disabled by
-default. If it still happens, try `WEBKIT_DISABLE_COMPOSITING_MODE=1 ./RQuickShare-*.AppImage`.
+default. If it still happens, try `WEBKIT_DISABLE_COMPOSITING_MODE=1 ./QuickShare-*.AppImage`.
 
 ## Building
 

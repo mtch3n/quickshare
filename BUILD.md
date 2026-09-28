@@ -39,7 +39,7 @@ Then repack it without the bundled Wayland libraries (they make WebKitGTK
 abort on current distributions):
 
 ```bash
-src-tauri/linux/repack-appimage.sh ../../target/release/bundle/appimage/rquickshare.AppDir RQuickShare.AppImage
+src-tauri/linux/repack-appimage.sh ../../target/release/bundle/appimage/rquickshare.AppDir QuickShare.AppImage
 ```
 
 ## Checks

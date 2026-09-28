@@ -287,7 +287,11 @@ impl InboundRequest {
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
-        Ok(RemoteDeviceInfo { name, device_type })
+        Ok(RemoteDeviceInfo {
+            name,
+            device_type,
+            fingerprint: None,
+        })
     }
 
     async fn process_ukey2_client_init(&mut self, msg: &Ukey2Message) -> Result<(), anyhow::Error> {

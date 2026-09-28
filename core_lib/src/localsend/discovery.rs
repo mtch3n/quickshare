@@ -115,14 +115,19 @@ async fn answer(
         from.ip(),
         peer.port.unwrap_or(PORT)
     );
-    let registered = shared
-        .http
-        .post(url)
-        .timeout(Duration::from_secs(3))
-        .json(&shared.info(None))
-        .send()
-        .await
-        .is_ok_and(|response| response.status().is_success());
+    let registered = match shared.client(&peer.fingerprint, peer.https()) {
+        Ok(client) => client
+            .post(url)
+            .timeout(Duration::from_secs(3))
+            .json(&shared.info(None))
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success()),
+        Err(e) => {
+            debug!("LocalSend: can't register with {}: {e}", peer.alias);
+            false
+        }
+    };
     if !registered {
         multicast.send(&shared.info(Some(false))).await;
     }

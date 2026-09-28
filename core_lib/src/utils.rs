@@ -35,6 +35,11 @@ impl DeviceType {
 pub struct RemoteDeviceInfo {
     pub name: String,
     pub device_type: DeviceType,
+    /// For a LocalSend sender, the fingerprint of the certificate it proved
+    /// it holds. Names can be anything, so LocalSend devices are trusted by
+    /// this instead.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 /// Endpoint info as advertised over mDNS and sent in the ConnectionRequest:

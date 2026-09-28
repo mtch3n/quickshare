@@ -18,6 +18,7 @@ mod client;
 mod discovery;
 mod identity;
 mod server;
+mod tls;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -66,11 +67,11 @@ struct DeviceInfo {
 }
 
 impl DeviceInfo {
+    /// Anything but a phone counts as a desktop, as in the reference app.
     fn device_type(&self) -> DeviceType {
         match self.device_type.as_deref() {
             Some("mobile") => DeviceType::Phone,
-            Some("desktop") => DeviceType::Laptop,
-            _ => DeviceType::Unknown,
+            _ => DeviceType::Laptop,
         }
     }
 
@@ -156,10 +157,29 @@ struct Shared {
     discovery: Mutex<Option<broadcast::Sender<EndpointInfo>>>,
     announce: Notify,
     sessions: Mutex<HashMap<String, Arc<server::Session>>>,
+    /// Our sends in progress, by the receiver's session id, so a receiver can
+    /// cancel them through our server.
+    outbound: Mutex<HashMap<String, (IpAddr, CancellationToken)>>,
+    /// For peers speaking plain HTTP.
     http: reqwest::Client,
+    /// Our certificate and key (DER), which HTTPS requests present.
+    cert: Vec<u8>,
+    key: Vec<u8>,
 }
 
 impl Shared {
+    /// A client for the peer with `fingerprint`. Over HTTPS it only talks to
+    /// that device: one whose certificate hashes to the fingerprint.
+    fn client(&self, fingerprint: &str, https: bool) -> Result<reqwest::Client, anyhow::Error> {
+        if !https {
+            return Ok(self.http.clone());
+        }
+        Ok(reqwest::Client::builder()
+            .use_preconfigured_tls(tls::client_config(fingerprint, &self.cert, &self.key)?)
+            .connect_timeout(Duration::from_secs(5))
+            .build()?)
+    }
+
     fn info(&self, announce: Option<bool>) -> DeviceInfo {
         DeviceInfo {
             alias: self.device_name.borrow().clone(),
@@ -268,7 +288,6 @@ impl LocalSend {
 
         let identity = identity::load_or_create(data_dir.as_deref())?;
         let http = reqwest::Client::builder()
-            .tls_danger_accept_invalid_certs(true)
             .connect_timeout(Duration::from_secs(5))
             .build()?;
 
@@ -281,7 +300,10 @@ impl LocalSend {
             discovery: Mutex::new(None),
             announce: Notify::new(),
             sessions: Mutex::new(HashMap::new()),
+            outbound: Mutex::new(HashMap::new()),
             http,
+            cert: identity.cert,
+            key: identity.key,
         });
 
         let (s, c) = (shared.clone(), ctk.clone());
@@ -333,10 +355,10 @@ mod tests {
             discovery: Mutex::new(None),
             announce: Notify::new(),
             sessions: Mutex::new(HashMap::new()),
-            http: reqwest::Client::builder()
-                .tls_danger_accept_invalid_certs(true)
-                .build()
-                .unwrap(),
+            outbound: Mutex::new(HashMap::new()),
+            http: reqwest::Client::new(),
+            cert: identity.cert,
+            key: identity.key,
         });
         tokio::spawn(server::serve(
             shared.clone(),
@@ -353,17 +375,18 @@ mod tests {
         port: u16,
         payload: OutboundPayload,
         answer: ChannelAction,
-    ) -> (ChannelMessage, ChannelMessage) {
+    ) -> (ChannelMessage, ChannelMessage, String) {
         let shared = start(port).await;
         let mut messages = shared.sender.subscribe();
         tokio::spawn(client::send(
             shared.clone(),
             SendInfo {
-                id: "peer".into(),
+                id: format!("ls-{}", shared.fingerprint),
                 name: "Desk".into(),
                 addr: format!("127.0.0.1:{port}"),
                 protocol: Protocol::LocalSend { https: true },
                 ob: payload,
+                pin: None,
             },
             true,
         ));
@@ -400,7 +423,11 @@ mod tests {
         })
         .await
         .expect("transfer didn't end");
-        (outbound.unwrap(), inbound.unwrap())
+        (
+            outbound.unwrap(),
+            inbound.unwrap(),
+            shared.fingerprint.clone(),
+        )
     }
 
     #[tokio::test]
@@ -413,7 +440,7 @@ mod tests {
         std::fs::write(&source, &content).unwrap();
         *crate::CUSTOM_DOWNLOAD.write().unwrap() = Some(dir.join("in"));
 
-        let (outbound, inbound) = send_to_self(
+        let (outbound, inbound, _) = send_to_self(
             53391,
             OutboundPayload::Files(vec![source.to_string_lossy().into_owned()]),
             ChannelAction::AcceptTransfer,
@@ -429,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn sends_and_receives_text() {
-        let (outbound, inbound) = send_to_self(
+        let (outbound, inbound, fingerprint) = send_to_self(
             53392,
             OutboundPayload::Text("https://localsend.org".into()),
             ChannelAction::AcceptTransfer,
@@ -440,12 +467,14 @@ mod tests {
         let meta = inbound.meta.unwrap();
         assert_eq!(inbound.state, Some(State::Finished));
         assert_eq!(meta.text_payload.as_deref(), Some("https://localsend.org"));
+        // It sent to itself, so the sender's certificate is its own.
+        assert_eq!(meta.source.unwrap().fingerprint, Some(fingerprint));
         assert!(matches!(meta.text_type, Some(TextPayloadType::Url)));
     }
 
     #[tokio::test]
     async fn reports_declined_transfers() {
-        let (outbound, inbound) = send_to_self(
+        let (outbound, inbound, _) = send_to_self(
             53393,
             OutboundPayload::Text("hi".into()),
             ChannelAction::RejectTransfer,
@@ -454,5 +483,95 @@ mod tests {
 
         assert_eq!(outbound.state, Some(State::Rejected));
         assert_eq!(inbound.state, Some(State::Rejected));
+    }
+
+    /// Sends text to a stand-in receiver that wants PIN 1234 and returns the
+    /// outcome: what it answered, and whether it saw the PIN.
+    async fn send_with_pin(port: u16, pin: Option<&str>) -> State {
+        use axum::extract::Query;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+
+        let router = axum::Router::new().route(
+            &format!("{API}/prepare-upload"),
+            post(|Query(query): Query<HashMap<String, String>>| async move {
+                match query.get("pin").map(String::as_str) {
+                    // Nothing to upload: the transfer is done.
+                    Some("1234") => StatusCode::NO_CONTENT,
+                    _ => StatusCode::UNAUTHORIZED,
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let shared = start(port + 100).await;
+        let mut messages = shared.sender.subscribe();
+        tokio::spawn(client::send(
+            shared.clone(),
+            SendInfo {
+                id: "peer".into(),
+                name: "Phone".into(),
+                addr: format!("127.0.0.1:{port}"),
+                protocol: Protocol::LocalSend { https: false },
+                ob: OutboundPayload::Text("hello".into()),
+                pin: pin.map(Into::into),
+            },
+            false,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let msg = messages.recv().await.unwrap();
+                match msg.state {
+                    Some(State::SentIntroduction) | None => {}
+                    Some(state) => return state,
+                }
+            }
+        })
+        .await
+        .expect("send didn't end")
+    }
+
+    #[tokio::test]
+    async fn asks_for_a_pin_and_sends_with_it() {
+        assert_eq!(send_with_pin(53394, None).await, State::PinRequired);
+        assert_eq!(send_with_pin(53395, Some("0000")).await, State::PinRequired);
+        assert_eq!(send_with_pin(53396, Some("1234")).await, State::Finished);
+    }
+
+    #[tokio::test]
+    async fn refuses_a_receiver_with_another_certificate() {
+        let shared = start(53397).await;
+        let mut messages = shared.sender.subscribe();
+        tokio::spawn(client::send(
+            shared.clone(),
+            SendInfo {
+                // Someone else's fingerprint, at our address.
+                id: format!("ls-{}", "AB".repeat(32)),
+                name: "Phone".into(),
+                addr: "127.0.0.1:53397".into(),
+                protocol: Protocol::LocalSend { https: true },
+                ob: OutboundPayload::Text("hello".into()),
+                pin: None,
+            },
+            true,
+        ));
+
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let msg = messages.recv().await.unwrap();
+                // The receiver must never hear of it.
+                assert_ne!(msg.rtype, Some(TransferType::Inbound));
+                if let Some(state @ (State::Disconnected | State::Finished)) = msg.state {
+                    return state;
+                }
+            }
+        })
+        .await
+        .expect("send didn't end");
+        assert_eq!(ended, State::Disconnected);
     }
 }

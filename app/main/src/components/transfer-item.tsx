@@ -1,5 +1,4 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager"
-import { openPath, openUrl } from "@tauri-apps/plugin-opener"
 import {
   CheckIcon,
   CopyIcon,
@@ -52,10 +51,16 @@ function status(transfer: Transfer) {
     case "Cancelled":
       return "Cancelled"
     case "Disconnected":
-      return "Connection lost"
+      return transfer.meta?.reason ?? "Connection lost"
+    case "PinRequired":
+      return "Needed a PIN"
     default:
       return "Connecting…"
   }
+}
+
+function openFailed(e: unknown) {
+  toast.add({ title: "Couldn't open", description: String(e), type: "error" })
 }
 
 async function copy(text: string) {
@@ -88,7 +93,12 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
   const [connectingWifi, setConnectingWifi] = useState(false)
 
   return (
-    <Item variant="outline" size="sm" role="listitem">
+    <Item
+      variant="muted"
+      size="sm"
+      role="listitem"
+      className="animate-in duration-200 fade-in-0 slide-in-from-top-1"
+    >
       <ItemMedia variant="icon">
         {state === "Finished" ? (
           <CheckIcon />
@@ -108,7 +118,7 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
         {state === "WaitingForUserConsent" && (
           <>
             <Button
-              variant="outline"
+              variant="secondary"
               size="sm"
               onClick={() => api.transferAction(id, "RejectTransfer")}
             >
@@ -124,7 +134,7 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
         )}
         {(active || state === "SentIntroduction") && (
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             onClick={() => api.transferAction(id, "CancelTransfer")}
           >
@@ -132,7 +142,7 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
           </Button>
         )}
         {state === "Finished" && direction === "Inbound" && text && (
-          <Button variant="outline" size="sm" onClick={() => copy(text)}>
+          <Button variant="secondary" size="sm" onClick={() => copy(text)}>
             <CopyIcon data-icon="inline-start" />
             Copy
           </Button>
@@ -141,7 +151,10 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
           meta?.text_type === "Url" &&
           text &&
           isWebUrl(text) && (
-            <Button size="sm" onClick={() => openUrl(text)}>
+            <Button
+              size="sm"
+              onClick={() => api.openUrl(text).catch(openFailed)}
+            >
               <ExternalLinkIcon data-icon="inline-start" />
               Open
             </Button>
@@ -151,9 +164,9 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
           !text &&
           meta?.destination && (
             <Button
-              variant="outline"
+              variant="secondary"
               size="sm"
-              onClick={() => openPath(meta.destination!)}
+              onClick={() => api.openPath(meta.destination!).catch(openFailed)}
             >
               <FolderOpenIcon data-icon="inline-start" />
               Open folder
@@ -178,7 +191,7 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
               Connect
             </Button>
             <Button
-              variant="outline"
+              variant="secondary"
               size="sm"
               onClick={() => copy(meta.wifi!.password)}
             >

@@ -17,8 +17,7 @@ pub struct Settings {
     download_path: String,
     keep_running: bool,
     desktop_integration: bool,
-    browser_extension_dir: String,
-    trusted_devices: Vec<String>,
+    trusted_devices: Vec<store::TrustedDevice>,
     auto_open_links: bool,
     auto_copy_text: bool,
 }
@@ -34,13 +33,6 @@ pub fn get_settings(app: AppHandle) -> Settings {
         download_path: rqs_lib::get_download_dir().to_string_lossy().into_owned(),
         keep_running: store::keep_running(&app),
         desktop_integration: integrations::installed(&app),
-        browser_extension_dir: app
-            .path()
-            .data_dir()
-            .map(|dir| dir.join(integrations::BROWSER_EXTENSION_DIR))
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
         trusted_devices: store::trusted_devices(&app),
         auto_open_links: store::auto_open_links(&app),
         auto_copy_text: store::auto_copy_text(&app),
@@ -133,6 +125,44 @@ pub fn take_pending_files(state: State<'_, PendingFiles>) -> Vec<String> {
     std::mem::take(&mut *state.0.lock().unwrap())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSummary {
+    path: String,
+    /// For a folder, the total of the files inside it.
+    size: u64,
+    is_dir: bool,
+}
+
+/// Sizes of the files about to be sent. Also lets the window load them over
+/// the asset protocol, for image previews.
+#[tauri::command]
+pub async fn inspect_files(app: AppHandle, paths: Vec<String>) -> Vec<FileSummary> {
+    let scope = app.asset_protocol_scope();
+    for path in &paths {
+        if let Err(e) = scope.allow_file(path) {
+            warn!("Can't preview {path}: {e}");
+        }
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .map(|path| {
+                let is_dir = std::path::Path::new(&path).is_dir();
+                let size = rqs_lib::expand_directories(std::slice::from_ref(&path))
+                    .iter()
+                    .filter_map(|(file, _)| std::fs::metadata(file).ok())
+                    .map(|m| m.len())
+                    .sum();
+                FileSummary { path, size, is_dir }
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Connect to a Wi-Fi network using NetworkManager.
 #[tauri::command]
 pub async fn connect_wifi(network: WifiNetwork) -> Result<(), String> {
@@ -149,18 +179,18 @@ pub fn send_action(state: &AppState, id: String, action: ChannelAction) {
 }
 
 #[tauri::command]
-pub fn trust_device(name: String, app: AppHandle) {
+pub fn trust_device(device: store::TrustedDevice, app: AppHandle) {
     let mut devices = store::trusted_devices(&app);
-    if !devices.contains(&name) {
-        devices.push(name);
+    if !devices.contains(&device) {
+        devices.push(device);
         store::set_trusted_devices(&app, &devices);
     }
 }
 
 #[tauri::command]
-pub fn untrust_device(name: String, app: AppHandle) {
+pub fn untrust_device(device: store::TrustedDevice, app: AppHandle) {
     let mut devices = store::trusted_devices(&app);
-    devices.retain(|d| d != &name);
+    devices.retain(|d| d != &device);
     store::set_trusted_devices(&app, &devices);
 }
 
@@ -172,4 +202,30 @@ pub fn set_auto_open_links(enabled: bool, app: AppHandle) {
 #[tauri::command]
 pub fn set_auto_copy_text(enabled: bool, app: AppHandle) {
     store::set_auto_copy_text(&app, enabled);
+}
+
+/// The desktop's accent color as `#rrggbb`, if it has one.
+#[tauri::command]
+pub async fn system_accent_color() -> Option<String> {
+    crate::accent::read().await
+}
+
+/// Opens a web link in the default browser.
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    crate::open::url(&url).await.map_err(|e| e.to_string())
+}
+
+/// Opens a file or folder with the desktop's default app.
+#[tauri::command]
+pub async fn open_path(path: String) -> Result<(), String> {
+    crate::open::path(&path).await.map_err(|e| e.to_string())
+}
+
+/// The latest release on GitHub, if it is newer than this build.
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> Result<Option<crate::update::Update>, String> {
+    crate::update::check(&app.package_info().version)
+        .await
+        .map_err(|e| e.to_string())
 }

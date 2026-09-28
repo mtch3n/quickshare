@@ -1,6 +1,7 @@
-//! The self-signed certificate our HTTPS server presents. LocalSend doesn't
-//! verify it; its SHA-256 is our fingerprint, which peers use to recognise us
-//! and we use to ignore our own announcements, so it is kept across restarts.
+//! Our self-signed certificate, which our HTTPS server presents and our client
+//! presents too (current LocalSend versions refuse uploads without one). Its
+//! SHA-256 is our fingerprint, which peers use to recognise us and we use to
+//! ignore our own announcements, so it is kept across restarts.
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -8,8 +9,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustls::ServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use sha2::{Digest, Sha256};
+
+use super::tls;
 
 const CERT_FILE: &str = "localsend-cert.der";
 const KEY_FILE: &str = "localsend-key.der";
@@ -17,6 +18,9 @@ const KEY_FILE: &str = "localsend-key.der";
 pub struct Identity {
     pub fingerprint: String,
     pub tls: Arc<ServerConfig>,
+    /// DER, for our requests to peers, which present the same certificate.
+    pub cert: Vec<u8>,
+    pub key: Vec<u8>,
 }
 
 pub fn load_or_create(dir: Option<&Path>) -> Result<Identity, anyhow::Error> {
@@ -33,23 +37,11 @@ pub fn load_or_create(dir: Option<&Path>) -> Result<Identity, anyhow::Error> {
         }
     };
 
-    let fingerprint = Sha256::digest(&cert)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-
-    let tls =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from(cert)],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
-            )?;
-
     Ok(Identity {
-        fingerprint,
-        tls: Arc::new(tls),
+        fingerprint: tls::fingerprint(&cert),
+        tls: Arc::new(tls::server_config(&cert, &key)?),
+        cert,
+        key,
     })
 }
 

@@ -1,6 +1,7 @@
 //! Sending to a LocalSend peer.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +42,11 @@ pub async fn send(shared: Arc<Shared>, info: SendInfo, https: bool) {
         Ok(list) => list,
         Err(e) => {
             warn!("LocalSend: can't send to {}: {e}", info.name);
+            let meta = TransferMetadata {
+                reason: Some(e.to_string()),
+                ..Default::default()
+            };
+            shared.emit(&id, TransferType::Outbound, State::Disconnected, &meta);
             return;
         }
     };
@@ -53,6 +59,7 @@ pub async fn send(shared: Arc<Shared>, info: SendInfo, https: bool) {
         source: Some(RemoteDeviceInfo {
             name: info.name.clone(),
             device_type: DeviceType::Unknown,
+            fingerprint: None,
         }),
         files: text
             .is_none()
@@ -73,11 +80,27 @@ pub async fn send(shared: Arc<Shared>, info: SendInfo, https: bool) {
     );
 
     let scheme = if https { "https" } else { "http" };
-    let base = format!("{scheme}://{}{API}", info.addr);
-    let state = match transfer(&shared, &id, &base, files, uploads, &mut meta, &cancelled).await {
+    // Discovery names LocalSend devices after their fingerprint.
+    let fingerprint = id.strip_prefix("ls-").unwrap_or_default();
+    let http = match shared.client(fingerprint, https) {
+        Ok(http) => http,
+        Err(e) => {
+            warn!("LocalSend: can't send to {}: {e:#}", info.name);
+            done.cancel();
+            shared.emit(&id, TransferType::Outbound, State::Disconnected, &meta);
+            return;
+        }
+    };
+    let peer = Peer {
+        http,
+        base: format!("{scheme}://{}{API}", info.addr),
+        ip: info.addr.parse::<SocketAddr>().ok().map(|a| a.ip()),
+        pin: info.pin.as_deref(),
+    };
+    let state = match transfer(&shared, &id, &peer, files, uploads, &mut meta, &cancelled).await {
         Ok(state) => state,
         Err(e) => {
-            warn!("LocalSend: sending to {} failed: {e}", info.name);
+            warn!("LocalSend: sending to {} failed: {e:#}", info.name);
             State::Disconnected
         }
     };
@@ -104,7 +127,11 @@ fn file_list(payload: &OutboundPayload) -> Result<FileList, anyhow::Error> {
             );
         }
         OutboundPayload::Files(paths) => {
-            for (path, folder) in expand_directories(paths) {
+            let expanded = expand_directories(paths);
+            if expanded.is_empty() {
+                return Err(anyhow!("there are no files to send, only empty folders"));
+            }
+            for (path, folder) in expanded {
                 let name = Path::new(&path)
                     .file_name()
                     .ok_or_else(|| anyhow!("{path} has no file name"))?
@@ -136,21 +163,51 @@ fn file_list(payload: &OutboundPayload) -> Result<FileList, anyhow::Error> {
     Ok(list)
 }
 
+/// Where a transfer goes.
+struct Peer<'a> {
+    /// Only talks to this device, over HTTPS.
+    http: reqwest::Client,
+    /// `https://ip:port/api/localsend/v2`
+    base: String,
+    /// Whose `/cancel` requests may cancel it.
+    ip: Option<IpAddr>,
+    pin: Option<&'a str>,
+}
+
+/// Lists a send in [`Shared::outbound`] while it runs.
+struct Outbound<'a> {
+    shared: &'a Shared,
+    session_id: String,
+}
+
+impl Drop for Outbound<'_> {
+    fn drop(&mut self) {
+        self.shared
+            .outbound
+            .lock()
+            .unwrap()
+            .remove(&self.session_id);
+    }
+}
+
 async fn transfer(
     shared: &Shared,
     id: &str,
-    base: &str,
+    peer: &Peer<'_>,
     files: HashMap<String, FileInfo>,
     uploads: HashMap<String, Upload>,
     meta: &mut TransferMetadata,
     cancelled: &CancellationToken,
 ) -> Result<State, anyhow::Error> {
+    let base = peer.base.as_str();
     shared.emit(id, TransferType::Outbound, State::SentIntroduction, meta);
 
     // Held open by the receiver until its user decides.
-    let request = shared
-        .http
-        .post(format!("{base}/prepare-upload"))
+    let mut request = peer.http.post(format!("{base}/prepare-upload"));
+    if let Some(pin) = peer.pin {
+        request = request.query(&[("pin", pin)]);
+    }
+    let request = request
         .json(&PrepareUpload {
             info: shared.info(None),
             files,
@@ -164,21 +221,43 @@ async fn transfer(
         StatusCode::OK => response.json().await?,
         StatusCode::NO_CONTENT => return Ok(State::Finished),
         StatusCode::FORBIDDEN => return Ok(State::Rejected),
-        StatusCode::UNAUTHORIZED => return Err(anyhow!("the receiver requires a PIN")),
-        StatusCode::CONFLICT => return Err(anyhow!("the receiver is busy with another transfer")),
+        // Missing or wrong: the frontend asks for it and sends again.
+        StatusCode::UNAUTHORIZED => return Ok(State::PinRequired),
+        StatusCode::CONFLICT => {
+            meta.reason = Some("Busy with another transfer".into());
+            return Ok(State::Disconnected);
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            meta.reason = Some("Too many wrong PINs".into());
+            return Ok(State::Disconnected);
+        }
         status => return Err(anyhow!("prepare-upload answered {status}")),
     };
 
+    let peer_cancelled = CancellationToken::new();
+    let _outbound = peer.ip.map(|ip| {
+        shared
+            .outbound
+            .lock()
+            .unwrap()
+            .insert(session.session_id.clone(), (ip, peer_cancelled.clone()));
+        Outbound {
+            shared,
+            session_id: session.session_id.clone(),
+        }
+    });
+
     shared.emit(id, TransferType::Outbound, State::SendingFiles, meta);
     let sent = Arc::new(AtomicU64::new(0));
-    let uploading = upload_all(shared, base, &session, &uploads, sent.clone());
+    let uploading = upload_all(peer, &session, &uploads, sent.clone());
     tokio::pin!(uploading);
     let mut ticker = tokio::time::interval(PROGRESS_INTERVAL);
 
     loop {
         tokio::select! {
+            _ = peer_cancelled.cancelled() => return Ok(State::Cancelled),
             _ = cancelled.cancelled() => {
-                let _ = shared
+                let _ = peer
                     .http
                     .post(format!("{base}/cancel?sessionId={}", session.session_id))
                     .timeout(Duration::from_secs(3))
@@ -201,8 +280,7 @@ async fn transfer(
 
 /// Uploads the files the receiver asked for (it gets a token), one at a time.
 async fn upload_all(
-    shared: &Shared,
-    base: &str,
+    peer: &Peer<'_>,
     session: &PrepareUploadResponse,
     uploads: &HashMap<String, Upload>,
     sent: Arc<AtomicU64>,
@@ -218,9 +296,9 @@ async fn upload_all(
                     counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 }
             });
-        let response = shared
+        let response = peer
             .http
-            .post(format!("{base}/upload"))
+            .post(format!("{}/upload", peer.base))
             .query(&[
                 ("sessionId", session.session_id.as_str()),
                 ("fileId", file_id.as_str()),

@@ -1,52 +1,53 @@
 import { TrashIcon } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { Empty } from "@/components/ui/empty"
-import { Field, FieldDescription, FieldTitle } from "@/components/ui/field"
-import { Item } from "@/components/ui/item"
-import { useQuickShare } from "@/hooks/quick-share"
-import { api } from "@/lib/tauri"
 
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Field, FieldLabel } from "@/components/ui/field"
+import { useQuickShare } from "@/hooks/quick-share"
+import { type TrustedDevice, api } from "@/lib/tauri"
+
+/** One settings row per trusted device. */
 export function TrustedDevices() {
   const { settings, updateSettings } = useQuickShare()
   const trustedDevices = settings?.trustedDevices ?? []
 
-  const handleRemove = (name: string) => {
-    api.untrustDevice(name).then(() => {
-      const updated = trustedDevices.filter((d) => d !== name)
+  const handleRemove = (device: TrustedDevice) => {
+    api.untrustDevice(device).then(() => {
+      const updated = trustedDevices.filter(
+        (d) => d.name !== device.name || d.fingerprint !== device.fingerprint
+      )
       updateSettings({ trustedDevices: updated })
     })
   }
 
-  return (
-    <Field>
-      <FieldTitle>Trusted devices</FieldTitle>
-      <FieldDescription>
-        Devices are recognized by name. Anyone nearby can use the same name, so
-        only trust devices on networks you trust.
-      </FieldDescription>
+  if (trustedDevices.length === 0) {
+    return (
+      <p className="flex items-center text-sm text-muted-foreground">
+        No trusted devices yet
+      </p>
+    )
+  }
 
-      {trustedDevices.length === 0 ? (
-        <Empty>No trusted devices yet</Empty>
-      ) : (
-        <div className="mt-4 flex flex-col gap-1">
-          {trustedDevices.map((name) => (
-            <Item
-              key={name}
-              className="flex items-center justify-between gap-2"
-            >
-              <span className="truncate text-sm">{name}</span>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={`Remove ${name}`}
-                onClick={() => handleRemove(name)}
-              >
-                <TrashIcon data-icon="inline-start" />
-              </Button>
-            </Item>
-          ))}
-        </div>
-      )}
+  return trustedDevices.map((device) => (
+    <Field
+      key={`${device.name}/${device.fingerprint}`}
+      orientation="horizontal"
+    >
+      <FieldLabel className="min-w-0">
+        <span className="truncate">{device.name}</span>
+        <Badge variant="secondary">
+          {device.fingerprint ? "LocalSend" : "Quick Share"}
+        </Badge>
+      </FieldLabel>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label={`Remove ${device.name}`}
+        title="Remove"
+        onClick={() => handleRemove(device)}
+      >
+        <TrashIcon />
+      </Button>
     </Field>
-  )
+  ))
 }

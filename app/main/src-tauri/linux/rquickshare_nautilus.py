@@ -1,5 +1,5 @@
 # Adds "Send with Quick Share" to the Nautilus context menu.
-# Installed by RQuickShare (Settings > File manager integration).
+# Installed by QuickShare (Settings > File manager integration).
 # Needs nautilus-python (python-nautilus / nautilus-python / python3-nautilus).
 
 import subprocess

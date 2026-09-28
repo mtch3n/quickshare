@@ -33,9 +33,17 @@ export function IncomingDialog() {
   const meta = pending.meta
   const files = meta?.files ?? []
   const name = meta?.source?.name ?? "A nearby device"
+  // LocalSend senders can only be trusted by the certificate they presented;
+  // one without (plain HTTP) can't be recognised later.
+  const localsend = pending.id.startsWith("ls-")
+  const fingerprint = meta?.source?.fingerprint ?? null
+  const trustable = !localsend || fingerprint !== null
   const respond = async (accept: boolean) => {
-    if (accept && trust) {
-      await api.trustDevice(name)
+    if (accept && trust && trustable) {
+      await api.trustDevice({
+        name,
+        fingerprint: localsend ? fingerprint : null,
+      })
     }
     api.transferAction(pending.id, accept ? "AcceptTransfer" : "RejectTransfer")
   }
@@ -84,19 +92,21 @@ export function IncomingDialog() {
           </p>
         )}
 
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="trust-device"
-            checked={trust}
-            onCheckedChange={setTrust}
-          />
-          <label
-            htmlFor="trust-device"
-            className="cursor-pointer text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-          >
-            Always accept from {name}
-          </label>
-        </div>
+        {trustable && (
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="trust-device"
+              checked={trust}
+              onCheckedChange={setTrust}
+            />
+            <label
+              htmlFor="trust-device"
+              className="cursor-pointer text-sm leading-none font-medium peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+            >
+              Always accept from {name}
+            </label>
+          </div>
+        )}
 
         <AlertDialogFooter>
           <AlertDialogCancel onClick={() => respond(false)}>

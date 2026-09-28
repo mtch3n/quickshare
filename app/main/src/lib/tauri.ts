@@ -8,16 +8,34 @@ import type { SendInfo } from "@bindings/SendInfo"
 import type { Visibility } from "@bindings/Visibility"
 import type { WifiNetwork } from "@bindings/WifiNetwork"
 
+/** Quick Share devices are trusted by name, LocalSend ones by certificate. */
+export type TrustedDevice = {
+  name: string
+  fingerprint: string | null
+}
+
 export type Settings = {
   deviceName: string
   visibility: Visibility
   downloadPath: string
   keepRunning: boolean
   desktopIntegration: boolean
-  browserExtensionDir: string
-  trustedDevices: string[]
+  trustedDevices: TrustedDevice[]
   autoOpenLinks: boolean
   autoCopyText: boolean
+}
+
+export type FileSummary = {
+  path: string
+  /** For a folder, the total of the files inside it. */
+  size: number
+  isDir: boolean
+}
+
+export type Update = {
+  version: string
+  /** The release page. */
+  url: string
 }
 
 /** Commands implemented in src-tauri/src/commands.rs. */
@@ -41,15 +59,24 @@ export const api = {
   takePendingFiles: () => invoke<string[]>("take_pending_files"),
   connectWifi: (network: WifiNetwork) =>
     invoke<void>("connect_wifi", { network }),
-  trustDevice: (name: string) => invoke<void>("trust_device", { name }),
-  untrustDevice: (name: string) => invoke<void>("untrust_device", { name }),
+  trustDevice: (device: TrustedDevice) =>
+    invoke<void>("trust_device", { device }),
+  untrustDevice: (device: TrustedDevice) =>
+    invoke<void>("untrust_device", { device }),
   setAutoOpenLinks: (enabled: boolean) =>
     invoke<void>("set_auto_open_links", { enabled }),
   setAutoCopyText: (enabled: boolean) =>
     invoke<void>("set_auto_copy_text", { enabled }),
+  systemAccentColor: () => invoke<string | null>("system_accent_color"),
+  /** Through the desktop portal, so the default browser opens it. */
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
+  openPath: (path: string) => invoke<void>("open_path", { path }),
+  checkUpdate: () => invoke<Update | null>("check_update"),
+  inspectFiles: (paths: string[]) =>
+    invoke<FileSummary[]>("inspect_files", { paths }),
 }
 
-/** Events emitted by src-tauri/src/main.rs and tray.rs. */
+/** Events emitted by src-tauri/src/main.rs, tray.rs and accent.rs. */
 type Events = {
   rs2js_channelmessage: ChannelMessage
   rs2js_endpointinfo: EndpointInfo
@@ -58,6 +85,7 @@ type Events = {
   send_files: string[]
   send_text: string
   pick_files: null
+  system_accent_color: string | null
 }
 
 export function on<K extends keyof Events>(

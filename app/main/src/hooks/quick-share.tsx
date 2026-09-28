@@ -21,6 +21,7 @@ const TERMINAL_STATES: State[] = [
   "Cancelled",
   "Rejected",
   "Disconnected",
+  "PinRequired",
 ]
 
 /** States worth showing; the rest are handshake internals. */
@@ -92,8 +93,11 @@ export function QuickShareProvider({
       ),
       on("rs2js_endpointinfo", (ei) =>
         setEndpoints((list) => {
-          const others = list.filter((e) => e.id !== ei.id)
-          return ei.present ? [...others, ei] : others
+          if (!ei.present) return list.filter((e) => e.id !== ei.id)
+          // Update in place: devices re-announce often, rows shouldn't jump.
+          return list.some((e) => e.id === ei.id)
+            ? list.map((e) => (e.id === ei.id ? ei : e))
+            : [...list, ei]
         })
       ),
       on("visibility_updated", (visibility) =>

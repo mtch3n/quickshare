@@ -69,7 +69,7 @@ impl ksni::Tray for Tray {
     }
 
     fn title(&self) -> String {
-        "RQuickShare".into()
+        "QuickShare".into()
     }
 
     fn icon_theme_path(&self) -> String {
@@ -109,7 +109,7 @@ impl ksni::Tray for Tray {
         };
 
         ToolTip {
-            title: "RQuickShare".into(),
+            title: "QuickShare".into(),
             description,
             ..Default::default()
         }
