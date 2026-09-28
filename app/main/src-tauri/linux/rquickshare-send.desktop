@@ -7,4 +7,4 @@ X-KDE-Priority=TopLevel
 [Desktop Action send]
 Name=Send with Quick Share
 Icon=rquickshare
-Exec=@EXEC@ --send %F
+Exec=@EXEC@ send %F

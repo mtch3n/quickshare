@@ -13,7 +13,8 @@ export type Settings = {
   visibility: Visibility
   downloadPath: string
   keepRunning: boolean
-  fileManagerIntegration: boolean
+  desktopIntegration: boolean
+  browserExtensionDir: string
   trustedDevices: string[]
   autoOpenLinks: boolean
   autoCopyText: boolean
@@ -30,8 +31,8 @@ export const api = {
     invoke<void>("set_device_name", { name }),
   setKeepRunning: (enabled: boolean) =>
     invoke<void>("set_keep_running", { enabled }),
-  setFileManagerIntegration: (enabled: boolean) =>
-    invoke<void>("set_file_manager_integration", { enabled }),
+  setDesktopIntegration: (enabled: boolean) =>
+    invoke<void>("set_desktop_integration", { enabled }),
   startDiscovery: () => invoke<void>("start_discovery"),
   stopDiscovery: () => invoke<void>("stop_discovery"),
   send: (info: SendInfo) => invoke<void>("send_payload", { info }),

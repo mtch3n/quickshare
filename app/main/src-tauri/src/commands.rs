@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use rqs_lib::channel::{ChannelAction, ChannelDirection, ChannelMessage};
 use rqs_lib::{SendInfo, Visibility, WifiNetwork};
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{AppState, PendingFiles, integrations, store, wifi};
 
@@ -16,7 +16,8 @@ pub struct Settings {
     visibility: Visibility,
     download_path: String,
     keep_running: bool,
-    file_manager_integration: bool,
+    desktop_integration: bool,
+    browser_extension_dir: String,
     trusted_devices: Vec<String>,
     auto_open_links: bool,
     auto_copy_text: bool,
@@ -32,7 +33,14 @@ pub fn get_settings(app: AppHandle) -> Settings {
         visibility: store::visibility(&app),
         download_path: rqs_lib::get_download_dir().to_string_lossy().into_owned(),
         keep_running: store::keep_running(&app),
-        file_manager_integration: integrations::installed(&app),
+        desktop_integration: integrations::installed(&app),
+        browser_extension_dir: app
+            .path()
+            .data_dir()
+            .map(|dir| dir.join(integrations::BROWSER_EXTENSION_DIR))
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
         trusted_devices: store::trusted_devices(&app),
         auto_open_links: store::auto_open_links(&app),
         auto_copy_text: store::auto_copy_text(&app),
@@ -80,14 +88,14 @@ pub fn set_keep_running(enabled: bool, app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn set_file_manager_integration(enabled: bool, app: AppHandle) -> Result<(), String> {
+pub fn set_desktop_integration(enabled: bool, app: AppHandle) -> Result<(), String> {
     let result = if enabled {
         integrations::install(&app)
     } else {
         integrations::uninstall(&app)
     };
 
-    result.map_err(|e| format!("Couldn't update the file manager integration: {e}"))
+    result.map_err(|e| format!("Couldn't update the desktop integrations: {e}"))
 }
 
 #[tauri::command]

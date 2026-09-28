@@ -2,7 +2,7 @@ import * as React from "react"
 import { getVersion } from "@tauri-apps/api/app"
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart"
 import { open } from "@tauri-apps/plugin-dialog"
-import { openUrl } from "@tauri-apps/plugin-opener"
+import { openPath, openUrl } from "@tauri-apps/plugin-opener"
 import { MonitorIcon, MoonIcon, SunIcon } from "lucide-react"
 
 import { type Theme, useTheme } from "@/components/theme-provider"
@@ -65,9 +65,9 @@ export function SettingsPage() {
 
   const toggleIntegration = (enabled: boolean) =>
     api
-      .setFileManagerIntegration(enabled)
-      .then(() => updateSettings({ fileManagerIntegration: enabled }))
-      .catch(reportError("Couldn't change the file manager menu"))
+      .setDesktopIntegration(enabled)
+      .then(() => updateSettings({ desktopIntegration: enabled }))
+      .catch(reportError("Couldn't change the desktop integrations"))
 
   return (
     <div className="flex min-h-full flex-col gap-4 px-4 pb-4">
@@ -131,18 +131,44 @@ export function SettingsPage() {
 
         <Field orientation="horizontal">
           <FieldContent>
-            <FieldLabel htmlFor="integration">File manager menu</FieldLabel>
+            <FieldLabel htmlFor="integration">Desktop integrations</FieldLabel>
             <FieldDescription>
-              Adds "Send with Quick Share" to Files, Dolphin and Nemo. Files
-              needs the nautilus-python package.
+              "Send with Quick Share" in Files, Dolphin and Nemo (Files needs
+              nautilus-python), a Quick Share tile in GNOME's quick settings
+              (after logging in again), and the browser extension's link to this
+              app.
             </FieldDescription>
           </FieldContent>
           <Switch
             id="integration"
-            checked={settings?.fileManagerIntegration ?? false}
+            checked={settings?.desktopIntegration ?? false}
             onCheckedChange={toggleIntegration}
           />
         </Field>
+
+        {settings?.desktopIntegration && (
+          <Field>
+            <FieldTitle>Browser extension</FieldTitle>
+            <FieldDescription>
+              Sends the page, a link or selected text from Chrome, Chromium,
+              Brave, Edge or Vivaldi. Open the browser's extensions page, turn
+              on Developer mode, choose Load unpacked, and pick this folder.
+            </FieldDescription>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  openPath(settings.browserExtensionDir).catch(
+                    reportError("Couldn't open the folder")
+                  )
+                }
+              >
+                Open folder
+              </Button>
+            </div>
+          </Field>
+        )}
 
         <FieldSeparator />
 

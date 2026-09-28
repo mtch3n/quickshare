@@ -1,6 +1,6 @@
 [Nemo Action]
 Name=Send with Quick Share
 Comment=Send the selected files or folders to a nearby device
-Exec=@EXEC@ --send %F
+Exec=@EXEC@ send %F
 Icon-Name=rquickshare
 Selection=notnone

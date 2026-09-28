@@ -16,7 +16,9 @@ use crate::logger::set_up_logging;
 use crate::notification::{send_request_notification, send_temporarily_notification};
 use crate::tray::TrayHandle;
 
+mod cli;
 mod commands;
+mod dbus;
 mod integrations;
 mod logger;
 mod notification;
@@ -25,7 +27,7 @@ mod tray;
 mod wifi;
 
 /// Passed by the autostart entry so the app starts in the tray.
-const HIDDEN_ARG: &str = "--hidden";
+pub const HIDDEN_ARG: &str = "--hidden";
 
 pub struct AppState {
     pub message_sender: broadcast::Sender<ChannelMessage>,
@@ -43,6 +45,11 @@ pub struct AppState {
 pub struct PendingFiles(pub Mutex<Vec<String>>);
 
 fn main() -> Result<(), anyhow::Error> {
+    let args: Vec<String> = std::env::args().collect();
+    if cli::is_client(&args) {
+        std::process::exit(cli::run(args));
+    }
+
     // WebKitGTK's DMA-BUF renderer shows a blank window on NVIDIA and some Mesa
     // setups. This has to happen before any other thread exists.
     // SAFETY: we are still single-threaded, nothing else reads the environment.
@@ -102,7 +109,7 @@ fn run() -> Result<(), anyhow::Error> {
             commands::set_download_path,
             commands::set_device_name,
             commands::set_keep_running,
-            commands::set_file_manager_integration,
+            commands::set_desktop_integration,
             commands::start_discovery,
             commands::stop_discovery,
             commands::send_payload,
@@ -118,12 +125,12 @@ fn run() -> Result<(), anyhow::Error> {
             set_up_logging(app.app_handle())?;
             debug!("Starting setup of RQuickShare app");
 
-            // Keep the file manager entries pointing at the current executable,
+            // Keep the integrations pointing at the current executable,
             // which moves when an AppImage is updated.
             if integrations::installed(app.app_handle())
                 && let Err(e) = integrations::install(app.app_handle())
             {
-                warn!("Couldn't refresh file manager integration: {e}");
+                warn!("Couldn't refresh the desktop integrations: {e}");
             }
 
             let visibility = store::visibility(app.app_handle());
@@ -156,6 +163,13 @@ fn run() -> Result<(), anyhow::Error> {
                 });
                 app_handle.manage(tray::spawn(&app_handle, visibility).await);
 
+                let dbus_app = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = dbus::serve(dbus_app).await {
+                        warn!("D-Bus service unavailable: {e}");
+                    }
+                });
+
                 Ok::<_, anyhow::Error>(())
             })?;
 
@@ -182,8 +196,8 @@ fn run() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Regular files among the arguments, resolved against `cwd`. Accepts both
-/// `rquickshare --send FILE...` and plain `rquickshare FILE...` (desktop %F).
+/// Files and folders among the arguments of `rquickshare FILE...` (desktop
+/// %F), resolved against `cwd`.
 fn files_from_args(args: &[String], cwd: &Path) -> Vec<String> {
     args.iter()
         .skip(1)

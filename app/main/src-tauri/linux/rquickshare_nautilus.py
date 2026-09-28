@@ -26,4 +26,4 @@ class RQuickShareMenuProvider(GObject.GObject, Nautilus.MenuProvider):
 
     def _send(self, _item, files):
         paths = [f.get_location().get_path() for f in files]
-        subprocess.Popen([EXEC, "--send", *paths], start_new_session=True)
+        subprocess.Popen([EXEC, "send", *paths], start_new_session=True)
