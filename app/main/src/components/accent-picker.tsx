@@ -1,6 +1,13 @@
+import * as React from "react"
 import { cn } from "cn"
 
 import { type Accent, useTheme } from "@/components/theme-provider"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+  InputGroupText,
+} from "@/components/ui/input-group"
 
 /** GNOME's accent colors (libadwaita 1.6). */
 const PRESETS = [
@@ -20,6 +27,7 @@ const SWATCH =
 
 export function AccentPicker() {
   const { accent, setAccent, systemAccent } = useTheme()
+  const [editing, setEditing] = React.useState(false)
   const custom =
     accent !== "system" &&
     accent !== "neutral" &&
@@ -64,25 +72,71 @@ export function AccentPicker() {
           style={{ background: color }}
         />
       ))}
-      <label
+      <button
+        type="button"
         role="radio"
         aria-checked={custom}
+        aria-expanded={editing}
         aria-label="Custom color"
         title="Custom color"
-        className={cn(SWATCH, "relative cursor-pointer")}
+        onClick={() => setEditing(!editing)}
+        className={SWATCH}
         style={{
           background: custom
             ? accent
             : "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)",
         }}
-      >
-        <input
-          type="color"
-          className="absolute inset-0 cursor-pointer opacity-0"
-          value={custom ? accent : (systemAccent ?? "#3584e4")}
-          onChange={(e) => setAccent(e.target.value as Accent)}
+      />
+      {editing && (
+        <HexField
+          initial={custom ? accent : (systemAccent ?? PRESETS[0].color)}
+          onChange={setAccent}
         />
-      </label>
+      )}
     </div>
+  )
+}
+
+/**
+ * A custom colour as hex, applied as soon as it's complete. In-page rather
+ * than `<input type="color">`, which WebKitGTK shows as GTK's own dialog.
+ */
+function HexField({
+  initial,
+  onChange,
+}: {
+  initial: string
+  onChange: (accent: Accent) => void
+}) {
+  const [text, setText] = React.useState(initial.slice(1))
+  const complete = /^[0-9a-f]{6}$/i.test(text)
+
+  return (
+    <InputGroup className="mt-1 w-full animate-in duration-200 fade-in-0 slide-in-from-top-1">
+      <InputGroupAddon>
+        <span
+          className="size-4 rounded-full bg-muted-foreground/30"
+          style={complete ? { background: `#${text}` } : undefined}
+        />
+        <InputGroupText>#</InputGroupText>
+      </InputGroupAddon>
+      <InputGroupInput
+        autoFocus
+        aria-label="Custom color, hex"
+        placeholder="3584e4"
+        maxLength={6}
+        spellCheck={false}
+        className="font-mono"
+        value={text}
+        aria-invalid={text.length === 6 && !complete}
+        onChange={(e) => {
+          const next = e.target.value.replace(/^#/, "").slice(0, 6)
+          setText(next)
+          if (/^[0-9a-f]{6}$/i.test(next)) {
+            onChange(`#${next.toLowerCase()}`)
+          }
+        }}
+      />
+    </InputGroup>
   )
 }
