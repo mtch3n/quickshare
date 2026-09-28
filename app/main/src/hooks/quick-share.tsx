@@ -70,7 +70,6 @@ type QuickShare = {
   endpoints: EndpointInfo[]
   clearEndpoints: () => void
   dismiss: (id: string) => void
-  clearFinished: () => void
 }
 
 const QuickShareContext = React.createContext<QuickShare | undefined>(undefined)
@@ -117,8 +116,6 @@ export function QuickShareProvider({
       endpoints,
       clearEndpoints: () => setEndpoints([]),
       dismiss: (id) => setTransfers((list) => list.filter((t) => t.id !== id)),
-      clearFinished: () =>
-        setTransfers((list) => list.filter((t) => !isTerminal(t.state))),
     }),
     [settings, transfers, endpoints]
   )
