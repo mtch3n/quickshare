@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.1
+
+### Features
+
+* Settings → Network: fixed Quick Share and LocalSend ports, for firewalls
+* Custom accent colour is entered as hex inline, instead of in GTK's colour dialog
+
+### Bug Fixes
+
+* LocalSend devices that open after the device list show up within seconds
+
 ## 0.13.0
 
 ### Features

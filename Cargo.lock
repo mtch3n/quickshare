@@ -4222,7 +4222,7 @@ dependencies = [
 
 [[package]]
 name = "rqs_lib"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "aes",
  "anyhow",
@@ -4261,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "rquickshare"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "anyhow",
  "arboard",
