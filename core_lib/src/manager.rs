@@ -183,8 +183,9 @@ async fn connect(
 
                             if or.state.state != State::Finished && or.state.state != State::Cancelled {
                                 let _ = sender.clone().send(ChannelMessage {
-                                    id: si.addr,
+                                    id: or.state.id.clone(),
                                     direction: ChannelDirection::LibToFront,
+                                    rtype: Some(TransferType::Outbound),
                                     state: Some(State::Disconnected),
                                     ..Default::default()
                                 });
